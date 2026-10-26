@@ -1,22 +1,21 @@
-// Drives web/index.html: runs the module in a memory this page creates, then
-// replays every host call as an animation over that memory. The chooser at
-// the top hands the module a different memory and replays the run in it.
+// Drives web/index.html, a five-step walkthrough: how a program normally gets
+// its memory, how an imported one differs, the program running in this page's
+// memory, its results read in place, and an experiment with other memories.
 //
-// URL fragment (for screenshots): `step=N` opens paused at step N, `all`
-// shows all 256 bytes, and `pages=P&limit=L` (or `limit=none`) starts the
-// program with that memory instead of the default.
+// The URL fragment names the step to open (`#normal`, `#imported`,
+// `#running`, `#results`, `#try`). For screenshots, `#running-12` opens the
+// replay paused at frame 12, and `#try-3-4` or `#try-1-none` starts the
+// program in that memory.
 
 import {
-  DEFAULT_MEMORY, PAGE_BYTES, ZOOM_START, makeReadings, expectedReport, runDemo, dataSegment,
-  memoryImport, judgeMemory, tryMemory,
+  DEFAULT_MEMORY, ZOOM_START, makeReadings, expectedReport, runDemo, dataSegment, memoryImport, judgeMemory, tryMemory,
 } from "../host/demo-core.mjs"; // @bundle-strip
 
 const $ = (id) => document.getElementById(id);
 const fmt = (n) => n.toLocaleString("en-US");
 const amount = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-const BAND_NAMES = ["under 10", "10–19", "20–29", "30 and up"];
-const BAND_SHORT = ["<10", "10–19", "20–29", "≥30"];
-const BAND_COLORS = ["var(--b0)", "var(--b1)", "var(--b2)", "var(--b3)"];
+const STEPS = ["normal", "imported", "running", "results", "try"];
+const BANDS = ["under 10", "10–19", "20–29", "30 and up"];
 const bandOf = (v) => (v >= 30 ? 3 : v >= 20 ? 2 : v >= 10 ? 1 : 0);
 const describe = (d) =>
   `new WebAssembly.Memory({ initial: ${d.initial}${d.maximum === undefined ? "" : `, maximum: ${d.maximum}`} })`;
@@ -49,243 +48,52 @@ function recordedRun(recorded) {
   };
 }
 
-/** The little-endian i32 at `address` in a snapshot of the zoomed window. */
-function int32At(bytes, address) {
-  const o = address - ZOOM_START;
-  return bytes[o] | (bytes[o + 1] << 8) | (bytes[o + 2] << 16) | (bytes[o + 3] << 24);
-}
-
-/** One frame per step, each with a plain caption: start-up, then one per host call. */
-function buildFrames(run, readings, report) {
-  const n = readings.length;
-  const { initial, maximum } = run.descriptor;
-  const grows = maximum > initial ? `, allowed to grow to ${maximum}` : "";
-  const hostPages = run.pages > 1
-    ? ` Page${run.pages > 2 ? `s 2–${run.pages} are` : " 2 is"} this page's own: it wrote a marker at the start of page 2 before the program started.`
-    : "";
-  const frames = [{
-    kind: "instantiated",
-    bytes: run.afterInstantiation,
-    sp: run.initialStackPointer,
-    now: `The page creates ${amount(run.pages, "page")} of memory${grows}, and starts the program`,
-    call: describe(run.descriptor),
-    explain: "The program brings no memory of its own. As it starts, it copies its built-in band limits, " +
-      `10, 20 and 30, into the top of page 1 (yellow).${hostPages}`,
-  }];
-  let seen = 0;
-  for (const event of run.events) {
-    const counted = (reading) => {
-      const band = bandOf(reading);
-      const count = int32At(event.bytes, report.histogramAddress + 4 * band);
-      return `the ${BAND_NAMES[band]} band, so that counter is now ${count}`;
-    };
-    if (event.kind === "count") {
-      frames.push({
-        ...event, seen,
-        now: `The program asks how many readings there are: ${event.value}`,
-        call: `sample_count() → ${event.value}`,
-        explain: `To do its work it sets aside ${run.initialStackPointer - event.sp} bytes just below the band ` +
-          "limits, under the dashed line: four band counters (blue) and four result slots (green), all starting at zero.",
-      });
-    } else if (event.kind === "sample") {
-      seen += 1;
-      const previous = event.index > 0 ? readings[event.index - 1] : null;
-      frames.push({
-        ...event, seen,
-        now: `The program asks for reading ${event.index + 1} of ${n} and gets ${event.value} °C`,
-        call: `sample(${event.index}) → ${event.value}`,
-        explain: previous === null
-          ? "Nothing is counted yet. The counters live in this page's memory, so every count the program makes shows up here."
-          : `It has just counted reading ${event.index} (${previous} °C) in ${counted(previous)}. ` +
-            "The pink bytes are that counter changing.",
-      });
-    } else {
-      const [count, min, max, sum] = event.stats;
-      const stayed = run.host
-        ? (run.host.untouched ? " Page 2's marker is untouched: the program stayed inside page 1." : " Page 2 was changed.")
-        : "";
-      frames.push({
-        ...event, seen,
-        now: "The program hands back its results",
-        call: `report(stats @ ${fmt(event.statsAddress)}, histogram @ ${fmt(event.histogramAddress)})`,
-        explain: `It counted the last reading (${readings[n - 1]} °C) in ${counted(readings[n - 1])}, ` +
-          "then told the page where its two arrays are. Nothing is copied: the page reads them where they are. " +
-          `${count} readings, lowest ${min} °C, highest ${max} °C, total ${fmt(sum)}.${stayed}`,
-      });
-    }
-  }
-  return frames;
-}
-
-function setupStatic(readings) {
-  $("chart").innerHTML = readings.map(() => "<span></span>").join("");
-  $("bars").innerHTML = BAND_SHORT.map((name, b) =>
-    `<span class="lab">${name}</span><span class="track"><span class="fill" style="background:${BAND_COLORS[b]}"></span></span><span class="n">0</span>`,
-  ).join("");
-  $("stats").innerHTML = ["readings", "lowest", "highest", "total"].map((k) =>
-    `<div class="stat"><div class="k">${k}</div><div class="v">—</div></div>`).join("");
-}
-
-/** The three rows worth reading, and what their four numbers are. */
-function namedRows(report, constants) {
-  return [
-    { key: "histogram", base: report.histogramAddress, title: "Band counters", sub: "readings per band",
-      fields: BAND_SHORT, idle: "not in use yet" },
-    { key: "results", base: report.statsAddress, title: "Results", sub: "written at the end",
-      fields: ["readings", "lowest", "highest", "total"], idle: "not in use yet", empty: "empty until the end" },
-    { key: "bands", base: constants.offset, title: "Band limits", sub: "built into the program",
-      fields: ["", "", "", null], idle: "" },
-  ];
-}
-
-/** One block per page handed over, then the room the memory may still grow into. */
-function renderPages(run) {
-  const total = Math.max(run.pages, run.descriptor.maximum ?? run.pages);
-  const blocks = [];
-  const labels = [];
-  for (let page = 1; page <= total; page += 1) {
-    if (page === 1) {
-      blocks.push(`<span class="pg program"></span>`);
-      labels.push(`<span><b>page 1</b>the program's</span>`);
-    } else if (page <= run.pages) {
-      blocks.push(`<span class="pg host"></span>`);
-      labels.push(`<span><b>page ${page}</b>this page's own</span>`);
-    } else {
-      blocks.push(`<span class="pg room"></span>`);
-      labels.push(`<span><b>page ${page}</b>room to grow</span>`);
-    }
-  }
-  $("pagesbar").innerHTML = blocks.join("");
-  $("pagelabels").innerHTML = labels.join("");
-}
-
-/** The start of page 2, which this page wrote and the program never touches. */
-function renderHost(run, frame) {
-  const panel = $("hostpage");
-  if (!run.host) {
-    panel.hidden = true;
-    return;
-  }
-  panel.hidden = false;
-  const cells = [...run.host.bytes].map((byte) => `<span class="b">${byte.toString(16).padStart(2, "0")}</span>`).join("");
-  const text = new TextDecoder().decode(run.host.bytes);
-  const status = frame.kind !== "report"
-    ? "This page wrote these bytes before it started the program."
-    : run.host.untouched
-      ? `<span class="ok">Unchanged after the run. All ${fmt(run.host.size)} bytes above page 1 are exactly as this page left them.</span>`
-      : `<span class="bad">Changed during the run.</span>`;
-  panel.innerHTML = `<h2>The start of page 2, this page's own</h2>` +
-    `<div class="row">${cells}</div><p class="hint" style="margin:0">As text: <code>${text}</code></p>` +
-    `<p class="status">${status}</p>`;
-}
-
-function render(state, index, showAll) {
-  const { run, frames, readings, expected, rows } = state;
-  const frame = frames[index];
-  const previous = index > 0 ? frames[index - 1].bytes : null;
-  $("step").textContent = `step ${index} of ${frames.length - 1}`;
-  $("now").textContent = frame.now;
-  $("call").textContent = frame.call;
-  $("explain").textContent = frame.explain;
-
-  const live = (address) => address >= frame.sp;
-  const rowOf = (base) => rows.find((row) => row.base === base);
-  const changed = (offset) => previous && previous[offset] !== frame.bytes[offset];
-  const html = [];
-  const visible = showAll
-    ? Array.from({ length: 16 }, (_, r) => r)
-    : rows.map((row) => (row.base - ZOOM_START) / 16).sort((a, b) => a - b);
-  if (!showAll) {
-    const hidden = Array.from({ length: 16 }, (_, r) => r).filter((r) => !visible.includes(r));
-    const used = hidden.reduce((sum, r) => sum + frame.bytes.slice(r * 16, r * 16 + 16).filter(Boolean).length, 0);
-    html.push(`<span class="addr"></span><span class="skipped">${hidden.length} rows above (${fmt(ZOOM_START)}–${fmt(ZOOM_START + hidden.length * 16 - 1)}) hidden: ` +
-      `${used ? `${used} bytes in use` : "all zero, never touched"}</span>`);
-  }
-  for (const r of visible) {
-    const base = ZOOM_START + r * 16;
-    if (base === frame.sp && frame.sp !== PAGE_BYTES) {
-      html.push(`<div class="sp" data-label="the program's working area starts here (stack pointer ${fmt(frame.sp)})"></div>`);
-    }
-    const row = rowOf(base);
-    const inUse = row && (row.key === "bands" || live(base));
-    if (row) html.push(`<span class="addr"></span><span class="rowhead ${row.key}"><b>${row.title}</b>${row.sub}</span>`);
-    html.push(`<span class="addr">${fmt(base)}</span>`);
-    for (let col = 0; col < 16; col += 1) {
-      const offset = r * 16 + col;
-      const byte = frame.bytes[offset];
-      const classes = ["b", row ? row.key : "", byte ? "nz" : "", row && !inUse ? "dimmed" : "",
-        col > 0 && col % 4 === 0 ? "gap" : "", changed(offset) ? "flash" : ""];
-      html.push(`<span class="${classes.join(" ")}">${byte.toString(16).padStart(2, "0")}</span>`);
-    }
-    if (!row) continue;
-    // The decoded line: each group of four bytes as the number it holds, or
-    // one note across the row while it holds nothing yet.
-    html.push(`<span class="addr"></span>`);
-    const allZero = frame.bytes.slice(r * 16, r * 16 + 16).every((byte) => byte === 0);
-    const note = !inUse ? row.idle : row.empty && allZero ? row.empty : null;
-    if (note !== null) {
-      html.push(`<span class="decoded wide off">${note}</span>`);
-      continue;
-    }
-    for (let g = 0; g < 4; g += 1) {
-      const gap = g > 0 ? " gap" : "";
-      const hot = [0, 1, 2, 3].some((k) => changed(r * 16 + g * 4 + k)) ? " hot" : "";
-      let text;
-      if (row.fields[g] === null) text = `<span class="k">unused</span>`;
-      else {
-        const value = fmt(int32At(frame.bytes, base + 4 * g));
-        text = row.fields[g] ? `<span class="k">${row.fields[g]}</span> ${value}` : value;
-      }
-      const off = row.fields[g] === null ? " off" : "";
-      html.push(`<span class="decoded${gap}${hot}${off}">${text}</span>`);
-    }
-  }
-  $("bytes").innerHTML = html.join("");
-  renderHost(run, frame);
-
-  // What the program asked for, so far.
-  const log = frames.slice(1, index + 1).map((f, i) => {
-    const plain = f.kind === "count" ? "how many?" : f.kind === "sample" ? `reading ${f.index + 1}` : "results";
-    return `<li class="${i === index - 1 ? "cur" : ""}">${f.call}<span>${plain}</span></li>`;
+/** `count` little-endian i32s starting at `address`, read from a snapshot of the page's end. */
+function ints(bytes, address, count) {
+  return Array.from({ length: count }, (_, k) => {
+    const o = address - ZOOM_START + 4 * k;
+    return bytes[o] | (bytes[o + 1] << 8) | (bytes[o + 2] << 16) | (bytes[o + 3] << 24);
   });
-  $("log").innerHTML = log.join("") || `<li>nothing yet</li>`;
-  $("log").scrollTop = $("log").scrollHeight;
+}
 
-  // Readings handed over so far.
-  const seen = frame.seen ?? 0;
-  [...$("chart").children].forEach((bar, i) => {
-    const on = i < seen;
-    bar.style.height = on ? `${8 + (readings[i] / 40) * 80}px` : "2px";
-    bar.style.background = on ? BAND_COLORS[bandOf(readings[i])] : "";
-    bar.title = on ? `reading ${i + 1}: ${readings[i]} °C` : "";
-    bar.classList.toggle("cur", frame.kind === "sample" && i === frame.index);
-  });
+/** The program's three regions, with their addresses in the page's memory. */
+function regionsOf(run, constants) {
+  const report = run.events.find((e) => e.kind === "report");
+  return { counters: report.histogramAddress, results: report.statsAddress, limits: constants.offset };
+}
 
-  // Band counters, decoded from the blue bytes.
-  const histogram = rows[0];
-  const counts = [0, 1, 2, 3].map((b) => (live(histogram.base) ? int32At(frame.bytes, histogram.base + 4 * b) : 0));
-  const fills = $("bars").querySelectorAll(".fill");
-  const ns = $("bars").querySelectorAll(".n");
-  counts.forEach((count, b) => {
-    fills[b].style.width = `${Math.min(100, (count / readings.length) * 220)}%`;
-    ns[b].textContent = count;
-  });
+/** Page 1 drawn as one bar, then the program's three regions enlarged, with the numbers they hold. */
+function stripHTML(frame, regions, { focus = [], hot = -1 } = {}) {
+  const inUse = frame.sp <= regions.counters;
+  const counters = inUse ? ints(frame.bytes, regions.counters, 4) : null;
+  const results = frame.kind === "report" ? frame.stats : null;
+  const limits = ints(frame.bytes, regions.limits, 3);
+  const nums = (values, keys, hotIndex = -1) => `<div class="nums">${keys.map((k, i) =>
+    `<span class="num${i === hotIndex ? " hot" : ""}"><span class="v">${values ? fmt(values[i]) : "–"}</span><span class="k">${k}</span></span>`,
+  ).join("")}</div>`;
+  const cell = (key, title, address, body, sub) =>
+    `<div class="cell ${key}${focus.includes(key) ? " focus" : ""}"><div class="head">${title}<span class="addr">byte ${fmt(address)}</span></div>${body}<div class="sub">${sub}</div></div>`;
+  return `<div class="bar">Page 1 of this page's memory: 65,536 bytes, nearly all of it empty room the program keeps for its stack</div>` +
+    `<p class="zoomnote">its last 48 bytes, enlarged</p><div class="cells">` +
+    cell("counters", "Band counters", regions.counters, nums(counters, BANDS, hot),
+      inUse ? "the program adds 1 to a band after each reading" : "not in use until the program starts counting") +
+    cell("results", "Results", regions.results, nums(results, ["readings", "lowest", "highest", "total"]),
+      results ? "written once, at the end" : "empty until the end") +
+    cell("limits", "Band limits", regions.limits, nums(limits, ["", "", ""]), "copied in when the program started") +
+    `</div>`;
+}
 
-  // Results, decoded from the green bytes once they are written.
-  const values = frame.kind === "report" ? frame.stats : null;
-  $("stats").querySelectorAll(".stat").forEach((cell, i) => {
-    cell.classList.toggle("on", Boolean(values));
-    cell.querySelector(".v").textContent = values ? fmt(values[i]) : "—";
-  });
-  if (frame.kind === "report") {
-    const agrees = JSON.stringify(frame.stats) === JSON.stringify(expected.stats) &&
-      JSON.stringify(frame.histogram) === JSON.stringify(expected.histogram);
-    $("check").innerHTML = agrees
-      ? `<span class="ok">Checked: this page's own arithmetic over the same readings gives the same answer.</span>`
-      : `<span class="bad">These disagree with this page's own arithmetic.</span>`;
-  } else {
-    $("check").textContent = "";
-  }
+/** The same three regions as raw bytes, for the details toggle. */
+function rawHTML(frame, regions) {
+  const rows = [["counters", regions.counters, "band counters"], ["results", regions.results, "results"],
+    ["limits", regions.limits, "band limits (last 4 bytes unused)"]];
+  return `<table>${rows.map(([key, base, what]) => {
+    const offset = base - ZOOM_START;
+    const cells = [...frame.bytes.slice(offset, offset + 16)].map((byte, i) =>
+      `<td class="${key}${i > 0 && i % 4 === 0 ? " gap" : ""}">${byte.toString(16).padStart(2, "0")}</td>`).join("");
+    return `<tr><th>${fmt(base)}</th>${cells}<td class="what">${what}</td></tr>`;
+  }).join("")}</table>` +
+    `<p class="note">Each number takes four bytes, smallest first, in hexadecimal: <code>0a 00 00 00</code> is 10.</p>`;
 }
 
 async function main() {
@@ -294,137 +102,189 @@ async function main() {
   const limits = memoryImport(wasm) ?? { minimum: 1, maximum: 4 };
   const constants = dataSegment(wasm);
   const expected = expectedReport(readings);
-  const params = new URLSearchParams(location.hash.slice(1));
-  const ui = { index: 0, timer: null, state: null, showAll: false, recorded: null };
+  const [hashStep, ...hashArgs] = location.hash.slice(1).split("-");
+  let recorded = null;
 
-  const show = (i) => {
-    ui.index = Math.max(0, Math.min(ui.state.frames.length - 1, i));
-    render(ui.state, ui.index, ui.showAll);
+  let run;
+  try {
+    run = await runDemo(wasm, readings, DEFAULT_MEMORY);
+  } catch (error) {
+    if (!globalThis.DEMO_RECORDED) throw error;
+    recorded = globalThis.DEMO_RECORDED;
+    run = recordedRun(recorded);
+    $("banner").hidden = false;
+    $("banner").textContent = "This viewer does not run WebAssembly, so the steps replay a run recorded from the same " +
+      "program, and the last step's experiment is switched off. The demo repository's page runs it live.";
+  }
+  const regions = regionsOf(run, constants);
+  const frames = [{ kind: "start", bytes: run.afterInstantiation, sp: run.initialStackPointer }, ...run.events];
+  const report = frames[frames.length - 1];
+
+  // Step 3: the program running, one host call per frame.
+  const player = { index: 0, timer: null };
+  const drawRunning = () => {
+    const frame = frames[player.index];
+    const seen = frame.kind === "sample" ? frame.index : frame.kind === "report" ? readings.length : 0;
+    const counted = frame.kind === "sample" && frame.index > 0 ? bandOf(readings[frame.index - 1]) : frame.kind === "report"
+      ? bandOf(readings[readings.length - 1]) : -1;
+    $("ticker").innerHTML =
+      frame.kind === "start" ? "Ready. <small>Press Play to hand the program its 24 readings.</small>"
+      : frame.kind === "count" ? `The program asks how many readings there are: ${frame.value}. <small>It sets up its counters, all zero.</small>`
+      : frame.kind === "sample" ? `Reading ${frame.index + 1} of ${readings.length}: ${frame.value} °C` +
+        (frame.index > 0 ? ` <small>The previous one (${readings[frame.index - 1]} °C) went into ${BANDS[counted]}.</small>` : "")
+      : `All ${readings.length} readings counted. <small>Next: how the results come back.</small>`;
+    [...$("readings").children].forEach((bar, i) => {
+      const handed = frame.kind === "sample" ? i <= frame.index : frame.kind === "report";
+      bar.style.height = handed ? `${6 + (readings[i] / 40) * 32}px` : "3px";
+      bar.className = frame.kind === "sample" && i === frame.index ? "cur" : handed ? "on" : "";
+    });
+    $("strip-running").innerHTML = stripHTML(frame, regions, { focus: ["counters"], hot: counted });
+    $("raw-running").innerHTML = rawHTML(frame, regions);
+    $("play").textContent = player.timer ? "Pause" : player.index === frames.length - 1 ? "Play again" : "Play";
   };
-  const stop = () => { clearInterval(ui.timer); ui.timer = null; $("play").textContent = "Play"; };
+  const pause = () => { clearInterval(player.timer); player.timer = null; drawRunning(); };
   const play = () => {
-    if (ui.index >= ui.state.frames.length - 1) show(0);
-    clearInterval(ui.timer);
-    $("play").textContent = "Pause";
-    ui.timer = setInterval(() => (ui.index >= ui.state.frames.length - 1 ? stop() : show(ui.index + 1)),
-      Number($("speed").value));
+    if (player.index === frames.length - 1) player.index = 0;
+    clearInterval(player.timer);
+    player.timer = setInterval(() => {
+      if (player.index >= frames.length - 1) return pause();
+      player.index += 1;
+      drawRunning();
+    }, 650);
+    drawRunning();
   };
+  $("readings").innerHTML = readings.map(() => "<span></span>").join("");
+  $("play").onclick = () => (player.timer ? pause() : play());
+  $("restart").onclick = () => { player.index = 0; play(); };
 
-  /** Runs the program in `descriptor`'s memory (or replays the recording) and shows that run. */
-  const load = async (descriptor) => {
-    const run = ui.recorded ? recordedRun(ui.recorded) : await runDemo(wasm, readings, descriptor);
-    const report = run.events.find((e) => e.kind === "report");
-    ui.state = { run, frames: buildFrames(run, readings, report), readings, expected, rows: namedRows(report, constants) };
-    renderPages(run);
-    $("footer").innerHTML =
-      `<code>instance.exports.memory === memory</code> is <b>${run.sameMemoryExported}</b>: the program's memory is this page's own object. ` +
-      `The program finished and returned <b>${run.result}</b>.`;
-  };
+  // Step 4: the results, read where the program put them.
+  $("callout").innerHTML = `The program calls <code>report(${fmt(report.statsAddress)}, ${fmt(report.histogramAddress)})</code>` +
+    `<span>"my results start at byte ${fmt(report.statsAddress)}, my counters at byte ${fmt(report.histogramAddress)}"</span>`;
+  $("strip-results").innerHTML = stripHTML(report, regions, { focus: ["results", "counters"] });
+  $("raw-results").innerHTML = rawHTML(report, regions);
+  const agrees = JSON.stringify(report.stats) === JSON.stringify(expected.stats) &&
+    JSON.stringify(report.histogram) === JSON.stringify(expected.histogram);
+  $("check").innerHTML = agrees
+    ? `<span class="ok">These match this page's own arithmetic over the same ${readings.length} readings.</span>`
+    : `<span class="bad">These do not match this page's own arithmetic.</span>`;
 
-  // The chooser.
-  $("asks").innerHTML = `The program asks for at least ${amount(limits.minimum, "page")}, allowed to grow to at most ` +
-    `${amount(limits.maximum, "page")}: its import is <code>(memory ${limits.minimum} ${limits.maximum})</code>. ` +
-    "Pick a memory and start the program in it.";
+  // Step 5: the experiment.
+  $("rules").innerHTML = `The program was built to need at least ${amount(limits.minimum, "page")} of 64 KiB, and to never ` +
+    `grow past ${amount(limits.maximum, "page")} (<code>max-pages = ${limits.maximum}</code>). Hand it a memory and see what it does.`;
   $("pages").innerHTML = Array.from({ length: 7 }, (_, n) => `<option value="${n}">${amount(n, "page")}</option>`).join("");
   $("limit").innerHTML = `<option value="none">no limit</option>` +
     Array.from({ length: 6 }, (_, n) => `<option value="${n + 1}">${amount(n + 1, "page")}</option>`).join("");
-  const chosen = () => {
-    const limit = $("limit").value;
-    return { initial: Number($("pages").value), ...(limit === "none" ? {} : { maximum: Number(limit) }) };
+  const chosen = () => ({ initial: Number($("pages").value),
+    ...($("limit").value === "none" ? {} : { maximum: Number($("limit").value) }) });
+  const choose = (d) => { $("pages").value = String(d.initial); $("limit").value = d.maximum === undefined ? "none" : String(d.maximum); };
+  const drawPages = (d, untouched) => {
+    const total = Math.max(d.initial, d.maximum ?? d.initial);
+    $("pagesbar").innerHTML = Array.from({ length: total }, (_, k) => {
+      const page = k + 1;
+      if (page === 1) return `<div class="pg program"><b>page 1</b>the program's</div>`;
+      if (page <= d.initial) return `<div class="pg hosts"><b>page ${page}</b>this page's own${untouched ? ", untouched" : ""}</div>`;
+      return `<div class="pg room"><b>page ${page}</b>room to grow</div>`;
+    }).join("");
   };
-  const choose = (descriptor) => {
-    $("pages").value = String(descriptor.initial);
-    $("limit").value = descriptor.maximum === undefined ? "none" : String(descriptor.maximum);
+  const start = async () => {
+    const d = chosen();
+    const verdict = judgeMemory(d, limits);
+    const engine = await tryMemory(wasm, d);
+    if (!engine.accepted) {
+      $("outcome").className = "outcome bad";
+      $("outcome").innerHTML = `<b>Refused. The program never started.</b>` +
+        (verdict.accepted ? "This page expected it to be accepted." : verdict.reason) +
+        `<span class="says">The browser says: ${engine.message.replace(/^(LinkError|RangeError|TypeError): (WebAssembly\.\w+\(\): )?/, "")}</span>`;
+      $("pagesbar").innerHTML = "";
+      return;
+    }
+    const tried = await runDemo(wasm, readings, d);
+    const [count, min, max] = tried.events.find((e) => e.kind === "report").stats;
+    const stayed = tried.host
+      ? ` It stayed inside page 1: ${tried.pages > 2 ? `pages 2–${tried.pages} are` : "page 2 is"} ${tried.host.untouched ? "exactly as this page left them" : "CHANGED"}.`
+      : "";
+    $("outcome").className = "outcome good";
+    $("outcome").innerHTML = `<b>Accepted. The program ran in this memory.</b>` +
+      `It counted all ${count} readings (lowest ${min} °C, highest ${max} °C).${stayed}` +
+      `<span class="says">${describe(d)}</span>`;
+    drawPages(d, tried.host?.untouched);
   };
   const preview = () => {
     const verdict = judgeMemory(chosen(), limits);
     $("outcome").className = "outcome";
-    $("outcome").innerHTML = `<b>${verdict.accepted ? "The program should accept this memory." : "The program should refuse this memory."}</b>` +
+    $("outcome").innerHTML = `<b>${verdict.accepted ? "This memory should be accepted." : "This memory should be refused."}</b>` +
       `${verdict.reason}<span class="says">${describe(chosen())}</span>`;
-  };
-  const start = async () => {
-    const descriptor = chosen();
-    const verdict = judgeMemory(descriptor, limits);
-    const engine = await tryMemory(wasm, descriptor);
-    if (engine.accepted) {
-      await load(descriptor);
-      $("outcome").className = "outcome good";
-      $("outcome").innerHTML = `<b>Started. The replay below now runs in this memory.</b>${verdict.reason}` +
-        `<span class="says">${describe(descriptor)}</span>`;
-      show(0);
-      if (!params.has("step")) play();
-    } else {
-      $("outcome").className = "outcome bad";
-      $("outcome").innerHTML = `<b>Refused. The replay below still shows the last memory that was accepted.</b>` +
-        `${verdict.accepted ? "This page expected the program to accept it." : verdict.reason}` +
-        `<span class="says">The browser says: ${engine.message.replace(/^(LinkError|RangeError|TypeError): (WebAssembly\.\w+\(\): )?/, "")}</span>`;
-    }
+    $("pagesbar").innerHTML = "";
   };
   $("pages").onchange = preview;
   $("limit").onchange = preview;
   $("start").onclick = start;
-  $("presets").innerHTML = `<span class="lead">Try:</span>` +
-    PRESETS.map((p, i) => `<button data-i="${i}">${p.label}</button>`).join("");
+  $("presets").innerHTML = PRESETS.map((p, i) => `<button data-i="${i}">${p.label}</button>`).join("");
   $("presets").addEventListener("click", (e) => {
     const button = e.target.closest("button");
     if (!button) return;
     choose(PRESETS[Number(button.dataset.i)].descriptor);
     start();
   });
-
-  setupStatic(readings);
-  const initial = params.has("pages")
-    ? { initial: Number(params.get("pages")), ...(params.get("limit") === "none" ? {} : { maximum: Number(params.get("limit") ?? params.get("pages")) }) }
-    : DEFAULT_MEMORY;
-  try {
-    choose(DEFAULT_MEMORY);
-    await load(DEFAULT_MEMORY);
-  } catch (error) {
-    if (!globalThis.DEMO_RECORDED) throw error;
-    ui.recorded = globalThis.DEMO_RECORDED;
-    await load(null);
-    $("banner").hidden = false;
-    $("banner").textContent =
-      "This viewer does not run WebAssembly, so the page is replaying a run recorded from the same program in " +
-      `${amount(ui.recorded.pages, "page")} of memory, and choosing a different memory is switched off. ` +
-      "The demo repository's page runs it live.";
+  choose(DEFAULT_MEMORY);
+  preview();
+  if (recorded) {
     for (const id of ["pages", "limit", "start"]) $(id).disabled = true;
     $("presets").querySelectorAll("button").forEach((button) => { button.disabled = true; });
-  }
-  if (!ui.recorded) {
-    $("outcome").className = "outcome good";
-    $("outcome").innerHTML = `<b>Running in the default memory.</b>${judgeMemory(DEFAULT_MEMORY, limits).reason}` +
-      `<span class="says">${describe(DEFAULT_MEMORY)}</span>`;
+    $("outcome").innerHTML = "<b>Switched off in this viewer.</b>It needs to run the program, and this viewer blocks WebAssembly.";
   }
 
-  $("play").onclick = () => (ui.timer ? stop() : play());
-  $("stepfwd").onclick = () => { stop(); show(ui.index + 1); };
-  $("stepback").onclick = () => { stop(); show(ui.index - 1); };
-  $("restart").onclick = () => { show(0); play(); };
-  $("speed").onchange = () => { if (ui.timer) play(); };
-  $("toggle").onclick = () => {
-    ui.showAll = !ui.showAll;
-    $("toggle").textContent = ui.showAll ? "Show only the rows that matter" : "Show all 256 bytes";
-    $("toggle").setAttribute("aria-pressed", String(ui.showAll));
-    render(ui.state, ui.index, ui.showAll);
+  // Navigation.
+  const sections = STEPS.map((id) => $(id));
+  $("progress").innerHTML = sections.map((section, i) =>
+    `<li><button data-i="${i}"><b>Step ${i + 1}</b><span>${section.dataset.name}</span></button></li>`).join("");
+  let current = 0;
+  const go = (i, { autoplay = true } = {}) => {
+    current = Math.max(0, Math.min(STEPS.length - 1, i));
+    sections.forEach((section, k) => { section.hidden = k !== current; });
+    $("progress").querySelectorAll("button").forEach((button, k) => {
+      button.classList.toggle("done", k < current);
+      if (k === current) button.setAttribute("aria-current", "step");
+      else button.removeAttribute("aria-current");
+    });
+    $("where").textContent = `Step ${current + 1} of ${STEPS.length}: ${sections[current].dataset.name}`;
+    $("back").disabled = current === 0;
+    $("next").disabled = current === STEPS.length - 1;
+    if (STEPS[current] === "running") {
+      if (autoplay && player.index === 0 && !player.timer) play();
+      else drawRunning();
+    } else if (player.timer) {
+      pause();
+    }
+    try { history.replaceState(null, "", `#${STEPS[current]}`); } catch { /* not allowed in every viewer */ }
   };
+  $("progress").addEventListener("click", (e) => {
+    const button = e.target.closest("button");
+    if (button) go(Number(button.dataset.i));
+  });
+  $("back").onclick = () => go(current - 1);
+  $("next").onclick = () => go(current + 1);
+  document.addEventListener("keydown", (e) => {
+    if (e.target.closest("select, input, textarea")) return;
+    if (e.key === "ArrowRight") go(current + 1);
+    if (e.key === "ArrowLeft") go(current - 1);
+  });
 
-  show(0);
-  if (params.has("all")) $("toggle").onclick();
-  if (params.has("pages") && !ui.recorded) {
-    choose(initial);
-    await start();
-  }
-  if (params.has("step")) {
+  const opening = Math.max(0, STEPS.indexOf(hashStep));
+  if (hashStep === "running" && hashArgs.length) {
     document.body.classList.add("static");
-    stop();
-    show(Number(params.get("step")));
-  } else if (!ui.timer) {
-    play();
+    player.index = Math.min(frames.length - 1, Number(hashArgs[0]));
+    go(opening, { autoplay: false });
+  } else {
+    go(opening);
+  }
+  if (hashStep === "try" && hashArgs.length === 2 && !recorded) {
+    choose({ initial: Number(hashArgs[0]), ...(hashArgs[1] === "none" ? {} : { maximum: Number(hashArgs[1]) }) });
+    await start();
   }
 }
 
 main().catch((error) => {
-  $("now").textContent = "Could not run the demo";
-  $("explain").textContent = String(error);
+  const stage = document.querySelector(".stage");
+  stage.innerHTML = `<h2>Could not run the demo</h2><p class="lede">${String(error)}</p>`;
 });

@@ -5,7 +5,7 @@ A small showcase of `[memory] import = true`. The Inference program in
 `env.memory`, so the host creates the memory before the module exists, hands
 it in at instantiation, and can watch everything the module keeps there.
 
-![The browser view at the report step](docs/browser-report-step.png)
+![Step 2 of the walkthrough: the page creates the memory and hands it to the program](docs/walkthrough-imported.png)
 
 ## What it shows
 
@@ -32,6 +32,20 @@ it in at instantiation, and can watch everything the module keeps there.
    no limit, a limit past four pages, no pages at all, or a memory that starts
    above its own limit.
 
+## The walkthrough
+
+The browser page is a five-step walkthrough, one idea per screen:
+
+1. **Normally**: a program creates its own memory, and the page can only look inside afterwards.
+2. **Imported**: with `[memory] import = true`, the page creates the memory and hands it over.
+3. **Running**: the program counts readings, and its counters change inside the page's memory.
+4. **Results**: the program says where its results are, and the page reads them there.
+5. **Try it**: hand the program a different memory and see it accepted or refused, and why.
+
+The raw bytes behind each number are one click away ("Show the raw bytes").
+
+![Step 4: the results, read where the program put them](docs/walkthrough-results.png)
+
 ## Run it
 
 Needs an `infs` and `infc` with compiler ABI 1.11 or newer (the release that
@@ -54,11 +68,9 @@ directly.
 `node host/run.mjs --plain` prints the same run as a plain log and exits 1 if
 the program's report disagrees with the host's arithmetic, if anything above
 page 1 changed, or if a memory the import does not admit was accepted, so it
-doubles as a test. In the browser, each step is captioned in plain words, and
-the memory view shows only the three rows the program uses, each decoded into
-the numbers it holds; "Show all 256 bytes" expands it. `#step=N` opens the
-replay paused at step N, `&all` starts with every byte shown, and
-`&pages=P&limit=L` (or `limit=none`) starts with that memory.
+doubles as a test. In the browser, `#normal`, `#imported`, `#running`,
+`#results` and `#try` open that step; `#running-12` opens the replay paused at
+frame 12, and `#try-3-4` (or `#try-1-none`) starts the program in that memory.
 
 ## What the build says
 
