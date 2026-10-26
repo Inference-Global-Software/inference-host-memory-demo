@@ -44,8 +44,11 @@ directly.
 
 `node host/run.mjs --plain` prints the same run as a plain log and exits 1 if
 the program's report disagrees with the host's arithmetic, so it doubles as a
-test. In the browser, `#step=N` opens the replay paused at step N, and adding
-`&offers` tries every memory in the contract panel.
+test. In the browser, each step is captioned in plain words, and the memory view
+shows only the three rows the program uses, each decoded into the numbers it
+holds; "Show all 256 bytes" expands it. `#step=N` opens the replay paused at
+step N, `&all` starts with every byte shown, and `&offers` tries every memory in
+the contract panel.
 
 ## What the build says
 
