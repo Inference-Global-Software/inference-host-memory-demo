@@ -1,11 +1,12 @@
-// Drives web/index.html, a five-step walkthrough: how a program normally gets
+// Drives web/index.html, a six-step walkthrough: how a program normally gets
 // its memory, how an imported one differs, the program running in this page's
-// memory, its results read in place, and an experiment with other memories.
+// memory, its results read in place, the page growing that memory up to the
+// program's limit, and an experiment with other memories.
 //
 // The URL fragment names the step to open (`#normal`, `#imported`,
-// `#running`, `#results`, `#try`). For screenshots, `#running-12` opens the
-// replay paused at frame 12, and `#try-3-4` or `#try-1-none` starts the
-// program in that memory.
+// `#running`, `#results`, `#growing`, `#try`). For screenshots, `#running-12`
+// and `#growing-12` open that replay paused at frame 12, and `#try-3-4` or
+// `#try-1-none` starts the program in that memory.
 
 import {
   DEFAULT_MEMORY, ZOOM_START, makeReadings, expectedReport, runDemo, dataSegment, memoryImport, judgeMemory, tryMemory,
@@ -14,7 +15,7 @@ import {
 const $ = (id) => document.getElementById(id);
 const fmt = (n) => n.toLocaleString("en-US");
 const amount = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-const STEPS = ["normal", "imported", "running", "results", "try"];
+const STEPS = ["normal", "imported", "running", "results", "growing", "try"];
 const BANDS = ["under 10", "10–19", "20–29", "30 and up"];
 const bandOf = (v) => (v >= 30 ? 3 : v >= 20 ? 2 : v >= 10 ? 1 : 0);
 const describe = (d) =>
@@ -60,6 +61,16 @@ function ints(bytes, address, count) {
 function regionsOf(run, constants) {
   const report = run.events.find((e) => e.kind === "report");
   return { counters: report.histogramAddress, results: report.statsAddress, limits: constants.offset };
+}
+
+/** The band counters as a cell of plain numbers, read from a snapshot. */
+function countersCellHTML(frame, regions, hot = -1) {
+  const inUse = frame.sp <= regions.counters;
+  const values = inUse ? ints(frame.bytes, regions.counters, 4) : null;
+  return `<div class="cell counters"><div class="head">Band counters, still in page 1<span class="addr">byte ${fmt(regions.counters)}</span></div>` +
+    `<div class="nums">${BANDS.map((k, i) =>
+      `<span class="num${i === hot ? " hot" : ""}"><span class="v">${values ? fmt(values[i]) : "–"}</span><span class="k">${k}</span></span>`).join("")}</div>` +
+    `<div class="sub">${inUse ? "the program keeps counting, whatever the page does with the memory" : "not in use until the program starts counting"}</div></div>`;
 }
 
 /** Page 1 drawn as one bar, then the program's three regions enlarged, with the numbers they hold. */
@@ -168,7 +179,78 @@ async function main() {
     ? `<span class="ok">These match this page's own arithmetic over the same ${readings.length} readings.</span>`
     : `<span class="bad">These do not match this page's own arithmetic.</span>`;
 
-  // Step 5: the experiment.
+  // Step 5: the page grows the memory while the program runs.
+  const growAt = Array.from({ length: limits.maximum - limits.minimum }, (_, k) =>
+    Math.round(((k + 1) * readings.length) / (limits.maximum - limits.minimum + 1)));
+  const grown = recorded?.growing
+    ? recordedRun(recorded.growing)
+    : recorded ? null : await runDemo(wasm, readings, { initial: limits.minimum, maximum: limits.maximum }, { growAt, tryPastLimit: true });
+  $("grow-lede").innerHTML = "The program never grows its memory itself: Inference has no heap. But it was built to allow up to " +
+    `${amount(limits.maximum, "page")} (<code>max-pages = ${limits.maximum}</code>), and the memory belongs to the page, so the ` +
+    `page can add pages whenever it needs more room for its own data. Here it starts with ${amount(limits.minimum, "page")} and ` +
+    `adds one every ${growAt[0]} readings, while the program keeps counting.`;
+  const growFrames = grown
+    ? [{ kind: "start", bytes: grown.afterInstantiation, sp: grown.initialStackPointer, pages: grown.startPages },
+      ...grown.events, { kind: "limit", bytes: grown.events.at(-1).bytes, sp: grown.events.at(-1).sp, pages: grown.pages }]
+    : null;
+  const grower = { index: 0, timer: null };
+  const drawGrowing = () => {
+    if (!growFrames) return;
+    const frame = growFrames[grower.index];
+    const counted = frame.kind === "sample" && frame.index > 0 ? bandOf(readings[frame.index - 1])
+      : frame.kind === "report" ? bandOf(readings[readings.length - 1]) : -1;
+    $("grow-ticker").innerHTML =
+      frame.kind === "start" ? `Ready. <small>The memory starts with ${amount(frame.pages, "page")}; the program allows up to ${limits.maximum}.</small>`
+      : frame.kind === "count" ? `The program asks how many readings there are: ${frame.value}. <small>Memory: ${amount(frame.pages, "page")}.</small>`
+      : frame.kind === "sample" && frame.grew ? `Reading ${frame.index + 1}: the page grows the memory to ${amount(frame.grew, "page")}. ` +
+        `<small>It writes its own data into page ${frame.grew}; the program doesn't notice.</small>`
+      : frame.kind === "sample" ? `Reading ${frame.index + 1} of ${readings.length}: ${frame.value} °C <small>Memory: ${amount(frame.pages, "page")}.</small>`
+      : frame.kind === "report" ? `All ${readings.length} readings counted, in ${amount(frame.pages, "page")} of memory. ` +
+        "<small>Now the page asks for one more page…</small>"
+      : `The page asks for page ${limits.maximum + 1}, and the browser refuses.`;
+    const blocks = [];
+    for (let page = 1; page <= limits.maximum + 1; page += 1) {
+      if (page === 1) blocks.push(`<div class="pg program"><b>page 1</b>the program's</div>`);
+      else if (page > limits.maximum) {
+        const tried = frame.kind === "limit";
+        blocks.push(`<div class="pg past${tried ? " tried" : ""}"><b>page ${page}</b>${tried ? "refused" : "past the limit"}</div>`);
+      } else if (page <= frame.pages) {
+        blocks.push(`<div class="pg hosts${frame.grew === page ? " new" : ""}"><b>page ${page}</b>added by this page</div>`);
+      } else blocks.push(`<div class="pg room"><b>page ${page}</b>room to grow</div>`);
+    }
+    $("grow-pages").innerHTML = blocks.join("");
+    $("grow-counters").innerHTML = countersCellHTML(frame, regions, counted);
+    const limitShown = frame.kind === "limit";
+    $("grow-limit").hidden = !limitShown;
+    if (limitShown && grown.pastLimit) {
+      $("grow-limit").innerHTML = `<b>Refused: the memory can't grow past ${amount(limits.maximum, "page")}.</b>` +
+        "That is the maximum the program declared, and the browser enforces it whoever asks. " +
+        (grown.host ? `Pages 2–${grown.pages} still hold exactly what this page wrote; the program never touched them.` : "") +
+        `<span class="says">The browser says: ${grown.pastLimit.message}</span>`;
+    }
+    $("grow-play").textContent = grower.timer ? "Pause" : grower.index === growFrames.length - 1 ? "Play again" : "Play";
+  };
+  const growPause = () => { clearInterval(grower.timer); grower.timer = null; drawGrowing(); };
+  const growPlay = () => {
+    if (!growFrames) return;
+    if (grower.index === growFrames.length - 1) grower.index = 0;
+    clearInterval(grower.timer);
+    grower.timer = setInterval(() => {
+      if (grower.index >= growFrames.length - 1) return growPause();
+      grower.index += 1;
+      drawGrowing();
+    }, 650);
+    drawGrowing();
+  };
+  $("grow-play").onclick = () => (grower.timer ? growPause() : growPlay());
+  $("grow-restart").onclick = () => { grower.index = 0; growPlay(); };
+  if (!growFrames) {
+    $("grow-ticker").textContent = "This viewer can't run WebAssembly, so this step needs the demo repository's page.";
+    $("grow-play").disabled = true;
+    $("grow-restart").disabled = true;
+  }
+
+  // Step 6: the experiment.
   $("rules").innerHTML = `The program was built to need at least ${amount(limits.minimum, "page")} of 64 KiB, and to never ` +
     `grow past ${amount(limits.maximum, "page")} (<code>max-pages = ${limits.maximum}</code>). Hand it a memory and see what it does.`;
   $("pages").innerHTML = Array.from({ length: 7 }, (_, n) => `<option value="${n}">${amount(n, "page")}</option>`).join("");
@@ -256,6 +338,12 @@ async function main() {
     } else if (player.timer) {
       pause();
     }
+    if (STEPS[current] === "growing") {
+      if (autoplay && grower.index === 0 && !grower.timer) growPlay();
+      else drawGrowing();
+    } else if (grower.timer) {
+      growPause();
+    }
     try { history.replaceState(null, "", `#${STEPS[current]}`); } catch { /* not allowed in every viewer */ }
   };
   $("progress").addEventListener("click", (e) => {
@@ -274,6 +362,10 @@ async function main() {
   if (hashStep === "running" && hashArgs.length) {
     document.body.classList.add("static");
     player.index = Math.min(frames.length - 1, Number(hashArgs[0]));
+    go(opening, { autoplay: false });
+  } else if (hashStep === "growing" && hashArgs.length && growFrames) {
+    document.body.classList.add("static");
+    grower.index = Math.min(growFrames.length - 1, Number(hashArgs[0]));
     go(opening, { autoplay: false });
   } else {
     go(opening);

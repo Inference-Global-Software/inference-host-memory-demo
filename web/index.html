@@ -46,7 +46,7 @@
   h1 { font-size: 26px; line-height: 1.25; margin: 4px 0 0; text-wrap: balance; letter-spacing: -0.01em; }
 
   /* Step bar. */
-  .progress ol { list-style: none; margin: 20px 0 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
+  .progress ol { list-style: none; margin: 20px 0 0; padding: 0; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; }
   .progress button { width: 100%; text-align: left; font: inherit; font-size: 13px; color: var(--muted); background: none;
     border: 0; border-top: 3px solid var(--line); padding: 6px 2px 0; cursor: pointer; }
   .progress button b { display: block; font-size: 12px; font-weight: 600; }
@@ -151,6 +151,11 @@
   .pg.program { background: var(--prog-soft); border: 2px solid var(--prog); }
   .pg.hosts { background: repeating-linear-gradient(135deg, var(--host-soft) 0 7px, transparent 7px 10px); border: 2px solid var(--host); }
   .pg.room { border: 2px dashed var(--line); color: var(--muted); }
+  .pg.past { border: 2px dashed var(--bad); color: var(--bad); }
+  .pg.past.tried { background: var(--bad-soft); }
+  .pg.new { animation: grow .7s ease-out; }
+  @keyframes grow { from { transform: scaleX(.15); opacity: .2; } to { transform: none; opacity: 1; } }
+  .cells.single { grid-template-columns: minmax(0, 1fr); max-width: 560px; margin-top: 14px; }
 
   button, select { font: inherit; font-size: 15px; color: var(--ink); background: var(--panel); border: 1px solid var(--line);
     border-radius: 8px; padding: 7px 14px; cursor: pointer; }
@@ -227,6 +232,24 @@ await WebAssembly.instantiate(program, { env: { memory }, sensor: { … } });</d
       <div class="strip" id="strip-results"></div>
       <p class="check" id="check"></p>
       <details><summary>Show the raw bytes</summary><div class="raw" id="raw-results"></div></details>
+    </section>
+
+    <section class="step" id="growing" data-name="Growing" hidden>
+      <h2>The page can grow the memory, up to the program's limit</h2>
+      <p class="lede" id="grow-lede"></p>
+      <p class="ticker" id="grow-ticker"></p>
+      <div class="player">
+        <button id="grow-play" class="primary">Play</button>
+        <button id="grow-restart">Start over</button>
+      </div>
+      <div class="pages" id="grow-pages"></div>
+      <div class="cells single" id="grow-counters"></div>
+      <p class="outcome bad" id="grow-limit" hidden></p>
+      <details><summary>For developers: growing the memory from JavaScript</summary>
+        <div class="code">memory.grow(1);                               // 1 page becomes 2
+const bytes = new Uint8Array(memory.buffer);  // read memory.buffer again:
+                                              // the old one is now detached
+memory.grow(1);  // at the program's maximum: RangeError</div></details>
     </section>
 
     <section class="step" id="try" data-name="Try it" hidden>

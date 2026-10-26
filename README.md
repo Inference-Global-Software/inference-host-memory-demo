@@ -34,13 +34,16 @@ it in at instantiation, and can watch everything the module keeps there.
 
 ## The walkthrough
 
-The browser page is a five-step walkthrough, one idea per screen:
+The browser page is a six-step walkthrough, one idea per screen:
 
 1. **Normally**: a program creates its own memory, and the page can only look inside afterwards.
 2. **Imported**: with `[memory] import = true`, the page creates the memory and hands it over.
 3. **Running**: the program counts readings, and its counters change inside the page's memory.
 4. **Results**: the program says where its results are, and the page reads them there.
-5. **Try it**: hand the program a different memory and see it accepted or refused, and why.
+5. **Growing**: while the program runs, the page grows the memory from 1 page to 4, writing
+   its own data into each new page; the program keeps counting in page 1. Then the page asks
+   for a fifth page, and the browser refuses: 4 is the maximum the program declared.
+6. **Try it**: hand the program a different memory and see it accepted or refused, and why.
 
 The raw bytes behind each number are one click away ("Show the raw bytes").
 
@@ -69,8 +72,9 @@ directly.
 the program's report disagrees with the host's arithmetic, if anything above
 page 1 changed, or if a memory the import does not admit was accepted, so it
 doubles as a test. In the browser, `#normal`, `#imported`, `#running`,
-`#results` and `#try` open that step; `#running-12` opens the replay paused at
-frame 12, and `#try-3-4` (or `#try-1-none`) starts the program in that memory.
+`#results`, `#growing` and `#try` open that step; `#running-12` and
+`#growing-12` open that replay paused at frame 12, and `#try-3-4` (or
+`#try-1-none`) starts the program in that memory.
 
 ## What the build says
 
@@ -86,6 +90,10 @@ memory section of its own, and its `memory` export is the host's object
 The same project refuses the builds that cannot carry an imported memory:
 `infs build -v` (no proof artifact for a module that imports its memory) and
 `target = "stellar"` (a Soroban contract defines its own memory).
+
+An Inference program never grows its memory itself: nothing the compiler emits
+grows memory. A `max-pages` above `pages` is room for the host to grow into,
+and the browser stops it at that maximum.
 
 ## The embedder contract
 

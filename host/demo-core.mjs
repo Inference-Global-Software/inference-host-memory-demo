@@ -144,22 +144,41 @@ export function judgeMemory(descriptor, limits) {
   return { accepted: true, reason: `Accepted: at least ${plural(minimum, "page")}, with a limit of at most ${maximum}.${extra}${growth}` };
 }
 
+/** The marker the host writes at the start of each of its pages: page 2 gets `HOST_MARKER`. */
+export function hostMarker(page) {
+  return page === 2 ? HOST_MARKER : `HOST PAGE ${page}`.padEnd(16, ".");
+}
+
 /**
- * Creates `descriptor`'s memory, writes the host's marker into page 2 if
- * there is one, instantiates the module against it, runs `main`, and returns
- * the result and a trace with one event per host call. Each event carries
- * the module's stack pointer at that moment and a copy of the top 256 bytes
- * of the first page.
+ * Creates `descriptor`'s memory, writes the host's marker into each page above
+ * the first, instantiates the module against it, runs `main`, and returns the
+ * result and a trace with one event per host call. Each event carries the
+ * module's stack pointer at that moment, the memory's size in pages, and a copy
+ * of the top 256 bytes of the first page.
+ *
+ * `growAt` lists the `sample(i)` calls during which the host grows the memory
+ * by one page (and marks the new page), as a host needing more room for its
+ * own data would; the program itself never grows memory. With `tryPastLimit`
+ * the host asks for one page more once the run is over, and the engine's
+ * answer is returned as `pastLimit`.
  */
-export async function runDemo(wasmBytes, readings, descriptor = DEFAULT_MEMORY) {
+export async function runDemo(wasmBytes, readings, descriptor = DEFAULT_MEMORY, { growAt = [], tryPastLimit = false } = {}) {
   const memory = new WebAssembly.Memory(descriptor);
-  const pages = memory.buffer.byteLength / PAGE_BYTES;
-  const hostArea = () => new Uint8Array(memory.buffer.slice(PAGE_BYTES));
-  if (pages > 1) new Uint8Array(memory.buffer).set(new TextEncoder().encode(HOST_MARKER), PAGE_BYTES);
-  const hostBefore = hostArea();
+  const pagesNow = () => memory.buffer.byteLength / PAGE_BYTES;
+  const startPages = pagesNow();
+  // What the host has written above page 1, to compare against after the run.
+  const writes = [];
+  const mark = (page) => {
+    const bytes = new TextEncoder().encode(hostMarker(page));
+    new Uint8Array(memory.buffer).set(bytes, (page - 1) * PAGE_BYTES);
+    writes.push({ offset: (page - 2) * PAGE_BYTES, bytes });
+  };
+  for (let page = 2; page <= startPages; page += 1) mark(page);
   const events = [];
   let instance;
 
+  // `memory.buffer` is read afresh every time: growing the memory detaches the
+  // old buffer, and a view kept from before would read as empty.
   const snapshot = () => new Uint8Array(memory.buffer.slice(ZOOM_START, PAGE_BYTES));
   const stackPointer = () => instance.exports.__stack_pointer.value;
   const ints = (address, count) => Array.from(new Int32Array(memory.buffer, address, count));
@@ -168,12 +187,18 @@ export async function runDemo(wasmBytes, readings, descriptor = DEFAULT_MEMORY) 
     env: { memory },
     sensor: {
       sample_count: () => {
-        events.push({ kind: "count", value: readings.length, sp: stackPointer(), bytes: snapshot() });
+        events.push({ kind: "count", value: readings.length, sp: stackPointer(), pages: pagesNow(), bytes: snapshot() });
         return readings.length;
       },
       sample: (i) => {
+        let grew = null;
+        if (growAt.includes(i)) {
+          memory.grow(1);
+          grew = pagesNow();
+          mark(grew);
+        }
         const value = readings[i];
-        events.push({ kind: "sample", index: i, value, sp: stackPointer(), bytes: snapshot() });
+        events.push({ kind: "sample", index: i, value, grew, sp: stackPointer(), pages: pagesNow(), bytes: snapshot() });
         return value;
       },
       // Both arrays arrive as addresses inside the host's own memory, and the
@@ -186,6 +211,7 @@ export async function runDemo(wasmBytes, readings, descriptor = DEFAULT_MEMORY) 
           stats: ints(statsAddress, 4),
           histogram: ints(histogramAddress, 4),
           sp: stackPointer(),
+          pages: pagesNow(),
           bytes: snapshot(),
         });
       },
@@ -196,10 +222,23 @@ export async function runDemo(wasmBytes, readings, descriptor = DEFAULT_MEMORY) 
   const initialStackPointer = instance.exports.__stack_pointer.value;
   const afterInstantiation = snapshot();
   const result = instance.exports.main();
-  const hostAfter = hostArea();
+  const pages = pagesNow();
+  const hostAfter = new Uint8Array(memory.buffer.slice(PAGE_BYTES));
+  const expected = new Uint8Array(hostAfter.length);
+  for (const { offset, bytes } of writes) expected.set(bytes, offset);
+  let pastLimit = null;
+  if (tryPastLimit) {
+    try {
+      memory.grow(1);
+      pastLimit = { refused: false, message: `grew to ${pagesNow()} pages` };
+    } catch (error) {
+      pastLimit = { refused: true, message: `${error.name}: ${error.message}` };
+    }
+  }
   return {
     memory,
     descriptor: { ...descriptor },
+    startPages,
     pages,
     result,
     events,
@@ -209,10 +248,11 @@ export async function runDemo(wasmBytes, readings, descriptor = DEFAULT_MEMORY) 
     host: pages > 1
       ? {
         bytes: hostAfter.slice(0, 16),
-        untouched: hostBefore.length === hostAfter.length && hostBefore.every((byte, i) => byte === hostAfter[i]),
+        untouched: expected.every((byte, i) => byte === hostAfter[i]),
         size: hostAfter.length,
       }
       : null,
+    pastLimit,
   };
 }
 
