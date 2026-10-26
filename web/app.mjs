@@ -1,19 +1,33 @@
 // Drives web/index.html: runs the module in a memory this page creates, then
-// replays every host call as an animation over that memory.
+// replays every host call as an animation over that memory. The chooser at
+// the top hands the module a different memory and replays the run in it.
 //
-// URL fragment: `#step=N` opens paused at step N, `all` shows all 256 bytes,
-// and `offers` tries every memory in the contract panel (for screenshots).
+// URL fragment (for screenshots): `step=N` opens paused at step N, `all`
+// shows all 256 bytes, and `pages=P&limit=L` (or `limit=none`) starts the
+// program with that memory instead of the default.
 
 import {
-  MEMORY, PAGE_BYTES, ZOOM_START, WRONG_MEMORIES, makeReadings, expectedReport, runDemo, dataSegment,
+  DEFAULT_MEMORY, PAGE_BYTES, ZOOM_START, makeReadings, expectedReport, runDemo, dataSegment,
+  memoryImport, judgeMemory, tryMemory,
 } from "../host/demo-core.mjs"; // @bundle-strip
 
 const $ = (id) => document.getElementById(id);
 const fmt = (n) => n.toLocaleString("en-US");
+const amount = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 const BAND_NAMES = ["under 10", "10–19", "20–29", "30 and up"];
 const BAND_SHORT = ["<10", "10–19", "20–29", "≥30"];
 const BAND_COLORS = ["var(--b0)", "var(--b1)", "var(--b2)", "var(--b3)"];
 const bandOf = (v) => (v >= 30 ? 3 : v >= 20 ? 2 : v >= 10 ? 1 : 0);
+const describe = (d) =>
+  `new WebAssembly.Memory({ initial: ${d.initial}${d.maximum === undefined ? "" : `, maximum: ${d.maximum}`} })`;
+const PRESETS = [
+  { label: "Exactly what it asks for", descriptor: { initial: 1, maximum: 1 } },
+  { label: "Room to grow", descriptor: { initial: 1, maximum: 4 } },
+  { label: "Extra pages for this page", descriptor: { initial: 3, maximum: 4 } },
+  { label: "No limit", descriptor: { initial: 1 } },
+  { label: "A limit of 5", descriptor: { initial: 1, maximum: 5 } },
+  { label: "No pages", descriptor: { initial: 0, maximum: 4 } },
+];
 
 async function loadWasm() {
   if (globalThis.DEMO_WASM_BASE64) {
@@ -31,6 +45,7 @@ function recordedRun(recorded) {
     ...recorded,
     afterInstantiation: bytes(recorded.afterInstantiation),
     events: recorded.events.map((event) => ({ ...event, bytes: bytes(event.bytes) })),
+    host: recorded.host ? { ...recorded.host, bytes: bytes(recorded.host.bytes) } : null,
   };
 }
 
@@ -43,14 +58,19 @@ function int32At(bytes, address) {
 /** One frame per step, each with a plain caption: start-up, then one per host call. */
 function buildFrames(run, readings, report) {
   const n = readings.length;
+  const { initial, maximum } = run.descriptor;
+  const grows = maximum > initial ? `, allowed to grow to ${maximum}` : "";
+  const hostPages = run.pages > 1
+    ? ` Page${run.pages > 2 ? `s 2–${run.pages} are` : " 2 is"} this page's own: it wrote a marker at the start of page 2 before the program started.`
+    : "";
   const frames = [{
     kind: "instantiated",
     bytes: run.afterInstantiation,
     sp: run.initialStackPointer,
-    now: "The page creates the memory and starts the program",
-    call: "new WebAssembly.Memory({ initial: 1, maximum: 1 })",
+    now: `The page creates ${amount(run.pages, "page")} of memory${grows}, and starts the program`,
+    call: describe(run.descriptor),
     explain: "The program brings no memory of its own. As it starts, it copies its built-in band limits, " +
-      "10, 20 and 30, into the top of this page's memory (yellow).",
+      `10, 20 and 30, into the top of page 1 (yellow).${hostPages}`,
   }];
   let seen = 0;
   for (const event of run.events) {
@@ -81,13 +101,16 @@ function buildFrames(run, readings, report) {
       });
     } else {
       const [count, min, max, sum] = event.stats;
+      const stayed = run.host
+        ? (run.host.untouched ? " Page 2's marker is untouched: the program stayed inside page 1." : " Page 2 was changed.")
+        : "";
       frames.push({
         ...event, seen,
         now: "The program hands back its results",
         call: `report(stats @ ${fmt(event.statsAddress)}, histogram @ ${fmt(event.histogramAddress)})`,
         explain: `It counted the last reading (${readings[n - 1]} °C) in ${counted(readings[n - 1])}, ` +
           "then told the page where its two arrays are. Nothing is copied: the page reads them where they are. " +
-          `${count} readings, lowest ${min} °C, highest ${max} °C, total ${fmt(sum)}.`,
+          `${count} readings, lowest ${min} °C, highest ${max} °C, total ${fmt(sum)}.${stayed}`,
       });
     }
   }
@@ -95,7 +118,6 @@ function buildFrames(run, readings, report) {
 }
 
 function setupStatic(readings) {
-  $("page").innerHTML = Array.from({ length: 64 }, (_, i) => `<span class="${i === 63 ? "top" : ""}"></span>`).join("");
   $("chart").innerHTML = readings.map(() => "<span></span>").join("");
   $("bars").innerHTML = BAND_SHORT.map((name, b) =>
     `<span class="lab">${name}</span><span class="track"><span class="fill" style="background:${BAND_COLORS[b]}"></span></span><span class="n">0</span>`,
@@ -116,8 +138,49 @@ function namedRows(report, constants) {
   ];
 }
 
-function render(state, index) {
-  const { frames, readings, expected, rows, showAll } = state;
+/** One block per page handed over, then the room the memory may still grow into. */
+function renderPages(run) {
+  const total = Math.max(run.pages, run.descriptor.maximum ?? run.pages);
+  const blocks = [];
+  const labels = [];
+  for (let page = 1; page <= total; page += 1) {
+    if (page === 1) {
+      blocks.push(`<span class="pg program"></span>`);
+      labels.push(`<span><b>page 1</b>the program's</span>`);
+    } else if (page <= run.pages) {
+      blocks.push(`<span class="pg host"></span>`);
+      labels.push(`<span><b>page ${page}</b>this page's own</span>`);
+    } else {
+      blocks.push(`<span class="pg room"></span>`);
+      labels.push(`<span><b>page ${page}</b>room to grow</span>`);
+    }
+  }
+  $("pagesbar").innerHTML = blocks.join("");
+  $("pagelabels").innerHTML = labels.join("");
+}
+
+/** The start of page 2, which this page wrote and the program never touches. */
+function renderHost(run, frame) {
+  const panel = $("hostpage");
+  if (!run.host) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  const cells = [...run.host.bytes].map((byte) => `<span class="b">${byte.toString(16).padStart(2, "0")}</span>`).join("");
+  const text = new TextDecoder().decode(run.host.bytes);
+  const status = frame.kind !== "report"
+    ? "This page wrote these bytes before it started the program."
+    : run.host.untouched
+      ? `<span class="ok">Unchanged after the run. All ${fmt(run.host.size)} bytes above page 1 are exactly as this page left them.</span>`
+      : `<span class="bad">Changed during the run.</span>`;
+  panel.innerHTML = `<h2>The start of page 2, this page's own</h2>` +
+    `<div class="row">${cells}</div><p class="hint" style="margin:0">As text: <code>${text}</code></p>` +
+    `<p class="status">${status}</p>`;
+}
+
+function render(state, index, showAll) {
+  const { run, frames, readings, expected, rows } = state;
   const frame = frames[index];
   const previous = index > 0 ? frames[index - 1].bytes : null;
   $("step").textContent = `step ${index} of ${frames.length - 1}`;
@@ -178,6 +241,7 @@ function render(state, index) {
     }
   }
   $("bytes").innerHTML = html.join("");
+  renderHost(run, frame);
 
   // What the program asked for, so far.
   const log = frames.slice(1, index + 1).map((f, i) => {
@@ -224,118 +288,140 @@ function render(state, index) {
   }
 }
 
-function setupOffers(wasm, recordedOffers) {
-  const noop = () => 0;
-  const offers = [
-    { title: "Hand it exactly what it asks for", descriptor: MEMORY },
-    ...WRONG_MEMORIES.map((wrong, i) => ({
-      ...wrong,
-      title: ["Hand it memory with no size limit", "Hand it memory allowed to grow to two pages",
-        "Hand it memory with no pages", "Hand it a function instead"][i],
-    })),
-  ];
-  $("offers").innerHTML = offers.map((offer, i) => {
-    const what = offer.descriptor
-      ? `{ ${Object.entries(offer.descriptor).map(([k, v]) => `${k}: ${v}`).join(", ")} }`
-      : "a function";
-    return `<div class="offer"><button data-i="${i}">${offer.title}<span class="what">${what}</span></button>` +
-      `<div class="verdict" id="v${i}">not tried yet</div></div>`;
-  }).join("");
-  const plain = (message) => message.replace(/^(LinkError: )?WebAssembly\.instantiate\(\): /, "");
-  const attempt = async (i) => {
-    const offer = offers[i];
-    const verdict = $(`v${i}`);
-    if (recordedOffers) {
-      const outcome = recordedOffers[i];
-      verdict.className = outcome.refused ? "verdict refused" : "verdict";
-      verdict.innerHTML = outcome.refused
-        ? `Refused (recorded): ${plain(outcome.message)}`
-        : `<span class="ok">Started</span> (recorded)`;
-      return;
-    }
-    try {
-      const memory = offer.descriptor ? new WebAssembly.Memory(offer.descriptor) : noop;
-      await WebAssembly.instantiate(wasm, { env: { memory }, sensor: { sample_count: noop, sample: noop, report: noop } });
-      verdict.className = "verdict";
-      verdict.innerHTML = `<span class="ok">Started</span>`;
-    } catch (error) {
-      verdict.className = "verdict refused";
-      verdict.textContent = `Refused: ${plain(error.message)}`;
-    }
-  };
-  $("offers").addEventListener("click", (e) => {
-    const button = e.target.closest("button");
-    if (button) attempt(Number(button.dataset.i));
-  });
-  return () => Promise.all(offers.map((_, i) => attempt(i)));
-}
-
 async function main() {
   const wasm = await loadWasm();
   const readings = makeReadings();
-  let run;
-  let recordedOffers = null;
+  const limits = memoryImport(wasm) ?? { minimum: 1, maximum: 4 };
+  const constants = dataSegment(wasm);
+  const expected = expectedReport(readings);
+  const params = new URLSearchParams(location.hash.slice(1));
+  const ui = { index: 0, timer: null, state: null, showAll: false, recorded: null };
+
+  const show = (i) => {
+    ui.index = Math.max(0, Math.min(ui.state.frames.length - 1, i));
+    render(ui.state, ui.index, ui.showAll);
+  };
+  const stop = () => { clearInterval(ui.timer); ui.timer = null; $("play").textContent = "Play"; };
+  const play = () => {
+    if (ui.index >= ui.state.frames.length - 1) show(0);
+    clearInterval(ui.timer);
+    $("play").textContent = "Pause";
+    ui.timer = setInterval(() => (ui.index >= ui.state.frames.length - 1 ? stop() : show(ui.index + 1)),
+      Number($("speed").value));
+  };
+
+  /** Runs the program in `descriptor`'s memory (or replays the recording) and shows that run. */
+  const load = async (descriptor) => {
+    const run = ui.recorded ? recordedRun(ui.recorded) : await runDemo(wasm, readings, descriptor);
+    const report = run.events.find((e) => e.kind === "report");
+    ui.state = { run, frames: buildFrames(run, readings, report), readings, expected, rows: namedRows(report, constants) };
+    renderPages(run);
+    $("footer").innerHTML =
+      `<code>instance.exports.memory === memory</code> is <b>${run.sameMemoryExported}</b>: the program's memory is this page's own object. ` +
+      `The program finished and returned <b>${run.result}</b>.`;
+  };
+
+  // The chooser.
+  $("asks").innerHTML = `The program asks for at least ${amount(limits.minimum, "page")}, allowed to grow to at most ` +
+    `${amount(limits.maximum, "page")}: its import is <code>(memory ${limits.minimum} ${limits.maximum})</code>. ` +
+    "Pick a memory and start the program in it.";
+  $("pages").innerHTML = Array.from({ length: 7 }, (_, n) => `<option value="${n}">${amount(n, "page")}</option>`).join("");
+  $("limit").innerHTML = `<option value="none">no limit</option>` +
+    Array.from({ length: 6 }, (_, n) => `<option value="${n + 1}">${amount(n + 1, "page")}</option>`).join("");
+  const chosen = () => {
+    const limit = $("limit").value;
+    return { initial: Number($("pages").value), ...(limit === "none" ? {} : { maximum: Number(limit) }) };
+  };
+  const choose = (descriptor) => {
+    $("pages").value = String(descriptor.initial);
+    $("limit").value = descriptor.maximum === undefined ? "none" : String(descriptor.maximum);
+  };
+  const preview = () => {
+    const verdict = judgeMemory(chosen(), limits);
+    $("outcome").className = "outcome";
+    $("outcome").innerHTML = `<b>${verdict.accepted ? "The program should accept this memory." : "The program should refuse this memory."}</b>` +
+      `${verdict.reason}<span class="says">${describe(chosen())}</span>`;
+  };
+  const start = async () => {
+    const descriptor = chosen();
+    const verdict = judgeMemory(descriptor, limits);
+    const engine = await tryMemory(wasm, descriptor);
+    if (engine.accepted) {
+      await load(descriptor);
+      $("outcome").className = "outcome good";
+      $("outcome").innerHTML = `<b>Started. The replay below now runs in this memory.</b>${verdict.reason}` +
+        `<span class="says">${describe(descriptor)}</span>`;
+      show(0);
+      if (!params.has("step")) play();
+    } else {
+      $("outcome").className = "outcome bad";
+      $("outcome").innerHTML = `<b>Refused. The replay below still shows the last memory that was accepted.</b>` +
+        `${verdict.accepted ? "This page expected the program to accept it." : verdict.reason}` +
+        `<span class="says">The browser says: ${engine.message.replace(/^(LinkError|RangeError|TypeError): (WebAssembly\.\w+\(\): )?/, "")}</span>`;
+    }
+  };
+  $("pages").onchange = preview;
+  $("limit").onchange = preview;
+  $("start").onclick = start;
+  $("presets").innerHTML = `<span class="lead">Try:</span>` +
+    PRESETS.map((p, i) => `<button data-i="${i}">${p.label}</button>`).join("");
+  $("presets").addEventListener("click", (e) => {
+    const button = e.target.closest("button");
+    if (!button) return;
+    choose(PRESETS[Number(button.dataset.i)].descriptor);
+    start();
+  });
+
+  setupStatic(readings);
+  const initial = params.has("pages")
+    ? { initial: Number(params.get("pages")), ...(params.get("limit") === "none" ? {} : { maximum: Number(params.get("limit") ?? params.get("pages")) }) }
+    : DEFAULT_MEMORY;
   try {
-    run = await runDemo(wasm, readings);
+    choose(DEFAULT_MEMORY);
+    await load(DEFAULT_MEMORY);
   } catch (error) {
-    const recorded = globalThis.DEMO_RECORDED;
-    if (!recorded) throw error;
-    run = recordedRun(recorded);
-    recordedOffers = recorded.offers;
+    if (!globalThis.DEMO_RECORDED) throw error;
+    ui.recorded = globalThis.DEMO_RECORDED;
+    await load(null);
     $("banner").hidden = false;
     $("banner").textContent =
-      "This viewer does not run WebAssembly, so the page is replaying a run recorded from the same program, " +
-      "and the contract panel shows the recorded refusals. The demo repository's page runs it live.";
+      "This viewer does not run WebAssembly, so the page is replaying a run recorded from the same program in " +
+      `${amount(ui.recorded.pages, "page")} of memory, and choosing a different memory is switched off. ` +
+      "The demo repository's page runs it live.";
+    for (const id of ["pages", "limit", "start"]) $(id).disabled = true;
+    $("presets").querySelectorAll("button").forEach((button) => { button.disabled = true; });
   }
-  const report = run.events.find((e) => e.kind === "report");
-  const state = {
-    frames: buildFrames(run, readings, report),
-    readings,
-    expected: expectedReport(readings),
-    rows: namedRows(report, dataSegment(wasm)),
-    showAll: false,
-  };
-  setupStatic(readings);
-  const tryAllOffers = setupOffers(wasm, recordedOffers);
-  $("footer").innerHTML =
-    `<code>instance.exports.memory === memory</code> is <b>${run.sameMemoryExported}</b>: the program's memory is this page's own object. ` +
-    `The program finished and returned <b>${run.result}</b>.`;
+  if (!ui.recorded) {
+    $("outcome").className = "outcome good";
+    $("outcome").innerHTML = `<b>Running in the default memory.</b>${judgeMemory(DEFAULT_MEMORY, limits).reason}` +
+      `<span class="says">${describe(DEFAULT_MEMORY)}</span>`;
+  }
 
-  const params = new URLSearchParams(location.hash.slice(1));
-  const { frames } = state;
-  let index = 0;
-  let timer = null;
-  const show = (i) => { index = Math.max(0, Math.min(frames.length - 1, i)); render(state, index); };
-  const stop = () => { clearInterval(timer); timer = null; $("play").textContent = "Play"; };
-  const play = () => {
-    if (index >= frames.length - 1) show(0);
-    clearInterval(timer);
-    $("play").textContent = "Pause";
-    timer = setInterval(() => (index >= frames.length - 1 ? stop() : show(index + 1)), Number($("speed").value));
-  };
-  const setShowAll = (on) => {
-    state.showAll = on;
-    $("toggle").textContent = on ? "Show only the rows that matter" : "Show all 256 bytes";
-    $("toggle").setAttribute("aria-pressed", String(on));
-    render(state, index);
-  };
-  $("play").onclick = () => (timer ? stop() : play());
-  $("stepfwd").onclick = () => { stop(); show(index + 1); };
-  $("stepback").onclick = () => { stop(); show(index - 1); };
+  $("play").onclick = () => (ui.timer ? stop() : play());
+  $("stepfwd").onclick = () => { stop(); show(ui.index + 1); };
+  $("stepback").onclick = () => { stop(); show(ui.index - 1); };
   $("restart").onclick = () => { show(0); play(); };
-  $("speed").onchange = () => { if (timer) play(); };
-  $("toggle").onclick = () => setShowAll(!state.showAll);
+  $("speed").onchange = () => { if (ui.timer) play(); };
+  $("toggle").onclick = () => {
+    ui.showAll = !ui.showAll;
+    $("toggle").textContent = ui.showAll ? "Show only the rows that matter" : "Show all 256 bytes";
+    $("toggle").setAttribute("aria-pressed", String(ui.showAll));
+    render(ui.state, ui.index, ui.showAll);
+  };
 
-  if (params.has("all")) setShowAll(true);
+  show(0);
+  if (params.has("all")) $("toggle").onclick();
+  if (params.has("pages") && !ui.recorded) {
+    choose(initial);
+    await start();
+  }
   if (params.has("step")) {
     document.body.classList.add("static");
-    show(Number(params.get("step")));
     stop();
-  } else {
-    show(0);
+    show(Number(params.get("step")));
+  } else if (!ui.timer) {
     play();
   }
-  if (params.has("offers")) await tryAllOffers();
 }
 
 main().catch((error) => {

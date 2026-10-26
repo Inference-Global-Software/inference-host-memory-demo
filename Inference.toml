@@ -53,8 +53,11 @@ mode = "compile"
 
 [memory]
 # The host supplies the memory: the module imports it as `env.memory` instead
-# of defining it. One fixed page, all of it the module's: stack and constants.
+# of defining it. The program lives in the first page (stack and constants);
+# the host may hand over up to four, and whatever lies above the first page is
+# the host's.
 pages = 1
+max-pages = 4
 import = true
 
 [host-imports]

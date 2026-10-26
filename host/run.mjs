@@ -5,17 +5,25 @@
 //   node host/run.mjs           animated replay (in a terminal)
 //   node host/run.mjs --fast    the same, quicker
 //   node host/run.mjs --plain   a plain log, for CI or a pipe
+//   node host/run.mjs --pages 3 --limit 4   hand over a different memory
 //
-// Exits 1 if the program's report disagrees with the host's own arithmetic.
+// Exits 1 if the program's report disagrees with the host's own arithmetic,
+// if the program wrote outside its first page, or if a memory the import does
+// not admit was accepted.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
-  MEMORY, PAGE_BYTES, ZOOM_START, makeReadings, expectedReport, runDemo,
-  tryWrongMemories, dataSegment,
+  DEFAULT_MEMORY, PAGE_BYTES, ZOOM_START, makeReadings, expectedReport, runDemo,
+  tryWrongMemories, dataSegment, memoryImport, judgeMemory,
 } from "./demo-core.mjs";
 
-const args = new Set(process.argv.slice(2));
+const argv = process.argv.slice(2);
+const args = new Set(argv);
+const option = (name) => {
+  const at = argv.indexOf(name);
+  return at >= 0 ? argv[at + 1] : undefined;
+};
 const plain = args.has("--plain") || !process.stdout.isTTY;
 const delay = args.has("--fast") ? 70 : 260;
 const wasmPath = fileURLToPath(new URL("../out/main.wasm", import.meta.url));
@@ -41,8 +49,20 @@ try {
   process.exit(2);
 }
 
+const limits = memoryImport(wasm);
+const descriptor = option("--pages") === undefined && option("--limit") === undefined
+  ? DEFAULT_MEMORY
+  : {
+    initial: Number(option("--pages") ?? DEFAULT_MEMORY.initial),
+    ...(option("--limit") === "none" ? {} : { maximum: Number(option("--limit") ?? DEFAULT_MEMORY.maximum) }),
+  };
+const judged = judgeMemory(descriptor, limits);
+if (!judged.accepted) {
+  console.error(`The program refuses ${JSON.stringify(descriptor)}: ${judged.reason}`);
+  process.exit(1);
+}
 const readings = makeReadings();
-const run = await runDemo(wasm, readings);
+const run = await runDemo(wasm, readings, descriptor);
 const report = run.events.find((event) => event.kind === "report");
 const expected = expectedReport(readings);
 const constants = dataSegment(wasm);
@@ -112,7 +132,8 @@ function frame(step, total, title, body) {
   return [
     `${heading}   ${counter}`,
     dim(" " + "─".repeat(78)),
-    ` ${bold("env.memory")}  created by the host · ${MEMORY.initial} page · ${fmt(PAGE_BYTES)} bytes · maximum ${MEMORY.maximum}`,
+    ` ${bold("env.memory")}  created by the host · ${run.pages} page(s) of ${fmt(PAGE_BYTES)} bytes · may grow to ${run.descriptor.maximum}` +
+      (run.pages > 2 ? ` · pages 2–${run.pages} are the host's` : run.pages === 2 ? " · page 2 is the host's" : ""),
     "",
     body,
     "",
@@ -187,22 +208,28 @@ try {
   const lines = refusals.map((outcome) => {
     const offered = outcome.descriptor ? JSON.stringify(outcome.descriptor) : "a function";
     const verdict = outcome.refused ? red("refused") : red("ACCEPTED (unexpected)");
-    return `  offer ${bold(offered.padEnd(28))} ${verdict}\n    ${dim(outcome.message)}`;
+    const why = judgeMemory(outcome.descriptor, limits).reason;
+    return `  offer ${bold(offered.padEnd(28))} ${verdict}\n    ${why}\n    ${dim(outcome.message)}`;
   });
   if (!plain) clear();
   console.log([
     bold(" The import is a contract: the engine refuses any other memory."),
     dim(" " + "─".repeat(78)),
-    ` The module imports ${bold("(memory 1 1)")}: at least 1 page, and a maximum of at most 1.`,
-    " So a host can never hand it more memory than its stack and overflow traps",
-    " were laid out for.",
+    ` The module imports ${bold(`(memory ${limits.minimum} ${limits.maximum})`)}: at least ${limits.minimum} page, allowed to grow to at most ${limits.maximum}.`,
+    " So a host can never hand it a memory that could outgrow the ceiling its stack and",
+    " overflow traps were laid out for.",
     "",
     ...lines,
     "",
     ` program returned ${run.result} · report ${matches ? green("matches") : red("does not match")} the host's arithmetic · ` +
       `memory export ${run.sameMemoryExported ? "is" : "is NOT"} the host's own object`,
+    run.host
+      ? ` the host's ${fmt(run.host.size)} bytes above page 1 ${run.host.untouched ? green("are untouched") : red("WERE CHANGED")} ` +
+        `(marker ${JSON.stringify(new TextDecoder().decode(run.host.bytes))})`
+      : " one page handed over: nothing above page 1 to check",
   ].join("\n"));
-  if (!matches || run.result !== 0 || refusals.some((outcome) => !outcome.refused)) process.exitCode = 1;
+  const strayed = run.host && !run.host.untouched;
+  if (!matches || strayed || run.result !== 0 || refusals.some((outcome) => !outcome.refused)) process.exitCode = 1;
 } finally {
   if (!plain) process.stdout.write("\x1b[?25h"); // show the cursor again
 }

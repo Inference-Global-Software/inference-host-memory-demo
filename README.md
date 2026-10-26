@@ -9,9 +9,9 @@ it in at instantiation, and can watch everything the module keeps there.
 
 ## What it shows
 
-1. **The host creates the memory.** `new WebAssembly.Memory({ initial: 1, maximum: 1 })`
+1. **The host creates the memory.** `new WebAssembly.Memory({ initial: 2, maximum: 4 })`
    exists before the module does. Instantiation writes the module's constant
-   table (`BANDS = [10, 20, 30]`) into it, at the top of the page.
+   table (`BANDS = [10, 20, 30]`) into it, at the top of the first page.
 2. **The module computes in it.** `main` carves its stack frame out of the
    host's memory and keeps a histogram array there. The host feeds 24 readings
    through `sample(i)` and can see the histogram's bytes change in its own
@@ -20,11 +20,17 @@ it in at instantiation, and can watch everything the module keeps there.
    addresses inside its memory. The host reads both arrays directly, with no
    copy and no lookup of the module's exports, and checks them against its own
    arithmetic.
-4. **The import is a contract.** The module asks for `(memory 1 1)`. Offer it
-   a memory with no maximum, a larger maximum, too few pages, or something that
-   is not a memory, and the engine refuses to instantiate it. A host can never
-   give the module more memory than its stack and overflow checks were laid
-   out for.
+4. **The program stays in its first page.** It is built with `pages = 1` and
+   `max-pages = 4`, so it imports `(memory 1 4)`: at least one page, allowed to
+   grow to at most four. Everything it uses lies in page 1. Before the run the
+   host writes a marker at the start of page 2, and afterwards every byte above
+   page 1 is exactly as the host left it.
+5. **You choose the memory.** In the browser, pick how many pages to hand over
+   and how far the memory may grow, or one of the quick picks. A memory the
+   import admits replays the whole run in that memory. Any other is refused by
+   the browser before the program starts, and the page says why in plain words:
+   no limit, a limit past four pages, no pages at all, or a memory that starts
+   above its own limit.
 
 ## Run it
 
@@ -37,27 +43,31 @@ node host/run.mjs           # terminal animation of the run
 node scripts/bundle.mjs     # writes dist/sensor-demo.html
 ```
 
+`node host/run.mjs --pages 3 --limit 4` runs in a different memory (`--limit
+none` asks for one with no limit, which the program refuses).
+
 Open `dist/sensor-demo.html` in a browser: it is self-contained and needs no
 server. To work on the page itself, serve the project root
 (`python3 -m http.server`) and open `/web/`, which loads `out/main.wasm`
 directly.
 
 `node host/run.mjs --plain` prints the same run as a plain log and exits 1 if
-the program's report disagrees with the host's arithmetic, so it doubles as a
-test. In the browser, each step is captioned in plain words, and the memory view
-shows only the three rows the program uses, each decoded into the numbers it
-holds; "Show all 256 bytes" expands it. `#step=N` opens the replay paused at
-step N, `&all` starts with every byte shown, and `&offers` tries every memory in
-the contract panel.
+the program's report disagrees with the host's arithmetic, if anything above
+page 1 changed, or if a memory the import does not admit was accepted, so it
+doubles as a test. In the browser, each step is captioned in plain words, and
+the memory view shows only the three rows the program uses, each decoded into
+the numbers it holds; "Show all 256 bytes" expands it. `#step=N` opens the
+replay paused at step N, `&all` starts with every byte shown, and
+`&pages=P&limit=L` (or `limit=none`) starts with that memory.
 
 ## What the build says
 
 ```text
-memory: 1 page(s), maximum 1, 65536-byte stack, imported from env.memory
+memory: 1 page(s) growable to 4, 65536-byte stack, imported from env.memory
 host-imports allowlist: sensor.report, sensor.sample, sensor.sample_count
 ```
 
-The module's first import is `(import "env" "memory" (memory 1 1))`, it has no
+The module's first import is `(import "env" "memory" (memory 1 4))`, it has no
 memory section of its own, and its `memory` export is the host's object
 (`instance.exports.memory === memory`).
 
@@ -67,11 +77,12 @@ The same project refuses the builds that cannot carry an imported memory:
 
 ## The embedder contract
 
-The module owns the first `pages` pages of the memory it is given: its shadow
-stack sits at the bottom and its constants directly above it. A host may read
-them, as this one does, but writes into them only through a `mut` argument
-during a call to one of its own functions. See *Importing the memory* in the
-Inference book for the full contract.
+The module owns the first `pages` pages of the memory it is given, here page 1:
+its shadow stack sits at the bottom and its constants directly above it. A host
+may read them, as this one does, but writes into them only through a `mut`
+argument during a call to one of its own functions. Everything above them is
+the host's, which is where this host keeps its marker. See *Importing the
+memory* in the Inference book for the full contract.
 
 ## Files
 
@@ -86,7 +97,7 @@ Inference book for the full contract.
 
 The build line reports the requested 65536-byte stack, while the module's
 actual stack is 65520 bytes, because its 12 bytes of constants sit at the top
-of the one page. That is a known `infs` reporting issue (Inferara/inference#549).
+of its page. That is a known `infs` reporting issue (Inferara/inference#549).
 
 ## License
 
