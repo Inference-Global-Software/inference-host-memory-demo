@@ -1,0 +1,80 @@
+[package]
+name = "inference-host-memory-demo"
+version = "0.1.0"
+infc_version = "0.0.6"
+
+# Optional fields:
+# description = "A brief description of the project"
+# authors = ["Your Name <you@example.com>"]
+# license = "MIT"
+
+# [dependencies]
+# Future: package dependencies
+# std = "0.1"
+
+[build]
+# The runtime the module is built for. "wasm32" -- the default -- is generic
+# WebAssembly, for an embedder that imposes no ABI of its own; "stellar" is a
+# Soroban smart contract, whose exported methods take and return the host's
+# 64-bit tagged word. "stellar" narrows what the project may contain: no proof
+# mode, no wasm-features, no [build.wasm-opt], no `infs run`, and an exported
+# function's parameters and return confined to the scalar set the convention
+# encodes, every parameter named in at most 30 bytes, and no parameter named as
+# another parameter's kebab-case CLI flag alias (`x` beside `_x`). "spacewasm"
+# is the SpaceWasm flight interpreter, and adds nothing to the module: the
+# artifact is the "wasm32" one byte for byte. It narrows only what a build may
+# contain -- no proof mode and no wasm-features -- and leaves [build.wasm-opt]
+# available; `infs run` executes it under the SpaceWasm interpreter itself,
+# with the F Prime reference host functions and no wasmtime. Names are matched
+# exactly; an unrecognized one is a load error, not a fall back to the default.
+# target = "wasm32"
+# Compilation mode: "compile" (executable WASM) or "proof" (Rocq specs).
+mode = "compile"
+# Post-MVP WebAssembly proposals to opt into. Empty (the default) emits pure
+# WebAssembly 1.0; "bulk-memory" lets codegen use memory.copy/memory.fill.
+# Changing this changes the instruction set of every artifact, in both modes.
+# wasm-features = ["bulk-memory"]
+# Which array accesses keep their runtime bounds guard. "all" -- the default --
+# keeps every one, so an access stays safe even if the analysis that proved it
+# in bounds were wrong. "omit-proven" drops the guard of each proven access for
+# a smaller, faster module whose proven accesses rest on that analysis alone;
+# the module then lists the functions it omitted a guard in.
+# bounds-checks = "all"
+# Not yet consumed:
+# optimize = "release"
+
+# [build.wasm-opt]
+# Post-build optimization of the executable via Binaryen wasm-opt. Uncomment to
+# enable; `auto-install` downloads the `wasm-opt` binary on first use when it is
+# not already present (equivalent to `infs component add wasm-opt`).
+# enabled = true
+# level = "3"
+# auto-install = true
+
+[memory]
+# The host supplies the memory: the module imports it as `env.memory` instead
+# of defining it. One fixed page, all of it the module's: stack and constants.
+pages = 1
+import = true
+
+[host-imports]
+# The host functions the program may bind, by import module.
+sensor = ["sample_count", "sample", "report"]
+
+# [memory] reference:
+# Linear memory of the emitted module. Any key may be given alone; the others
+# keep their defaults. The memory is fixed at `pages` unless `max-pages` lets it
+# grow, which only a linked module or the host can do. `stack-size` also sets
+# the budget A036 measures call-chain frame usage against, so a smaller stack
+# tightens that diagnostic. `import = true` imports the memory from the host as
+# `env.memory` instead of defining it, for the `wasm32` target only, and not in
+# a proof build.
+# pages = 1
+# max-pages = 1
+# stack-size = 65536
+# import = false
+
+# [verification]
+# Output directory for proof artifacts (honored only in proof mode).
+# Defaults to "proofs/".
+# output-dir = "proofs/"

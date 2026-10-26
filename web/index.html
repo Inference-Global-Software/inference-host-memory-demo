@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Host-Owned Memory</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1d2330; --muted: #6a7385; --line: #e2e6ee;
+    --empty: #eef1f6; --stack: #dfe7f5; --frame: #2b8fd6; --frame-soft: #d4ebfb;
+    --data: #d99a00; --data-soft: #fff1c9; --stats: #1f9d63; --stats-soft: #d6f3e5;
+    --flash: #c2338f; --bad: #c43b3b; --bad-soft: #fbe3e3; --good: #1f9d63;
+    --b0: #5b9bd5; --b1: #4bb3a4; --b2: #e2a03f; --b3: #d75a3a;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f131a; --panel: #171c25; --ink: #e6e9ef; --muted: #8e97a8; --line: #2a3140;
+      --empty: #1d2330; --stack: #222b3a; --frame: #4aa9ee; --frame-soft: #17344d;
+      --data: #f0b429; --data-soft: #3d3112; --stats: #3cc58a; --stats-soft: #123826;
+      --flash: #e05fb5; --bad: #f07070; --bad-soft: #3d1c1c; --good: #3cc58a;
+      --b0: #6eaee6; --b1: #5cc6b6; --b2: #eeb24f; --b3: #ea6c4c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f131a; --panel: #171c25; --ink: #e6e9ef; --muted: #8e97a8; --line: #2a3140;
+    --empty: #1d2330; --stack: #222b3a; --frame: #4aa9ee; --frame-soft: #17344d;
+    --data: #f0b429; --data-soft: #3d3112; --stats: #3cc58a; --stats-soft: #123826;
+    --flash: #e05fb5; --bad: #f07070; --bad-soft: #3d1c1c; --good: #3cc58a;
+    --b0: #6eaee6; --b1: #5cc6b6; --b2: #eeb24f; --b3: #ea6c4c;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1240px; margin: 0 auto; padding: 24px 16px 40px; }
+  header { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: end; justify-content: space-between; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); margin: 0; max-width: 70ch; }
+  .sub code { white-space: nowrap; }
+  code, .mono { font-family: var(--mono); font-size: 0.92em; }
+  .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  button, select { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+  button:hover { border-color: var(--frame); }
+  button.primary { background: var(--frame); border-color: var(--frame); color: #fff; }
+  .step { font-family: var(--mono); color: var(--muted); min-width: 7ch; text-align: right; }
+  .grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 16px; margin-top: 20px; }
+  @media (max-width: 960px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; min-width: 0; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 12px; }
+  .now { font-size: 17px; margin: 0 0 4px; min-height: 1.5em; }
+  .now b { font-family: var(--mono); }
+  .explain { color: var(--muted); margin: 0; min-height: 2.9em; }
+
+  /* The whole page, 64 cells of 1 KiB. */
+  .page { display: grid; grid-template-columns: repeat(64, 1fr); gap: 1px; height: 26px; }
+  .page span { background: var(--stack); border-radius: 2px; }
+  .page span.top { background: linear-gradient(90deg, var(--stack) 0 40%, var(--frame) 40% 85%, var(--data) 85%); }
+  .scale { display: flex; justify-content: space-between; color: var(--muted); font: 12px var(--mono); margin: 4px 0 14px; }
+  .zoomnote { color: var(--muted); font-size: 13px; margin: 0 0 8px; }
+
+  /* The top 256 bytes, 16 per row. */
+  .bytes { display: grid; grid-template-columns: 7ch repeat(16, minmax(0, 1fr)) minmax(0, 13ch); gap: 3px 3px; align-items: center; }
+  .addr { font: 12px var(--mono); color: var(--muted); }
+  .b { font: 12px var(--mono); text-align: center; padding: 3px 0; border-radius: 4px; background: var(--empty); color: var(--muted); }
+  .b.nz { color: var(--ink); }
+  .b.bands { background: var(--data-soft); color: var(--ink); box-shadow: inset 0 -2px 0 var(--data); }
+  .b.histogram { background: var(--frame-soft); color: var(--ink); box-shadow: inset 0 -2px 0 var(--frame); }
+  .b.stats { background: var(--stats-soft); color: var(--ink); box-shadow: inset 0 -2px 0 var(--stats); }
+  .b.dimmed { opacity: 0.35; }
+  .b.flash { animation: flash 0.9s ease-out; }
+  @keyframes flash { 0% { background: var(--flash); color: #fff; transform: scale(1.18); } 100% { } }
+  .rowlabel { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rowlabel.histogram { color: var(--frame); } .rowlabel.stats { color: var(--stats); } .rowlabel.bands { color: var(--data); }
+  .sp { grid-column: 1 / -1; height: 0; border-top: 2px dashed var(--frame); position: relative; margin: 2px 0; transition: opacity .3s; }
+  .sp::after { content: attr(data-label); position: absolute; right: 0; top: -9px; background: var(--panel);
+    color: var(--frame); font: 11px var(--mono); padding: 0 4px; }
+
+  /* Readings and histogram. */
+  .chart { display: flex; align-items: end; gap: 3px; height: 92px; border-bottom: 1px solid var(--line); }
+  .chart span { flex: 1; border-radius: 3px 3px 0 0; background: var(--line); height: 2px; transition: height .35s ease, background .35s; }
+  .chart span.cur { outline: 2px solid var(--flash); outline-offset: 1px; }
+  .bars { display: grid; grid-template-columns: 5ch 1fr 3ch; gap: 6px 10px; align-items: center; margin-top: 4px; }
+  .bars .lab { font: 12px var(--mono); color: var(--muted); text-align: right; }
+  .bars .track { display: block; background: var(--empty); border-radius: 6px; height: 16px; overflow: hidden; }
+  .bars .fill { display: block; height: 100%; width: 0; border-radius: 6px; transition: width .35s ease; }
+  .bars .n { font: 13px var(--mono); }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 12px; }
+  .stat { background: var(--empty); border-radius: 8px; padding: 8px 10px; transition: background .3s; }
+  .stat .k { font-size: 12px; color: var(--muted); }
+  .stat .v { font: 600 18px var(--mono); }
+  .stat.on { background: var(--stats-soft); }
+  .check { margin: 10px 0 0; font-size: 14px; min-height: 1.4em; }
+  .ok { color: var(--good); } .bad { color: var(--bad); }
+
+  .log { list-style: none; margin: 0; padding: 0; max-height: 154px; overflow: auto; font: 13px var(--mono); }
+  .log li { padding: 2px 6px; border-radius: 4px; color: var(--muted); }
+  .log li.cur { background: var(--frame-soft); color: var(--ink); }
+
+  .contract { margin-top: 16px; }
+  .offers { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+  .offer { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .offer button { width: 100%; text-align: left; font-family: var(--mono); font-size: 13px; white-space: normal; overflow-wrap: anywhere; }
+  .verdict { font: 12px/1.4 var(--mono); margin-top: 8px; min-height: 3.2em; color: var(--muted); }
+  .verdict.refused { color: var(--bad); background: var(--bad-soft); border-radius: 6px; padding: 6px 8px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--muted); font-size: 12px; margin-top: 12px; }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+  footer { color: var(--muted); font-size: 13px; margin-top: 18px; }
+  .bytes-wrap { overflow-x: auto; }
+  .bytes-wrap .bytes { min-width: 600px; }
+  @media (max-width: 640px) {
+    h1 { font-size: 19px; }
+    .sub code { white-space: normal; overflow-wrap: anywhere; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+  body.static * { transition: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>A module running in a memory the host owns</h1>
+      <p class="sub">This page creates <code>new WebAssembly.Memory({ initial: 1, maximum: 1 })</code>,
+        then instantiates an Inference module built with <code>[memory] import = true</code> against it.
+        Everything below is that memory, watched from the host's side.</p>
+    </div>
+    <div class="controls">
+      <button id="play" class="primary">Pause</button>
+      <button id="stepback" aria-label="Previous step">‹</button>
+      <button id="stepfwd" aria-label="Next step">›</button>
+      <button id="restart">Restart</button>
+      <select id="speed" aria-label="Speed">
+        <option value="900">Slow</option>
+        <option value="450" selected>Normal</option>
+        <option value="150">Fast</option>
+      </select>
+      <span class="step" id="step">0/0</span>
+    </div>
+  </header>
+
+  <div class="grid">
+    <section class="card">
+      <h2>env.memory: one 64 KiB page, created by the host</h2>
+      <p class="now" id="now">Loading…</p>
+      <p class="explain" id="explain"></p>
+      <div class="page" id="page" aria-hidden="true"></div>
+      <div class="scale"><span>0</span><span>shadow stack (grows down)</span><span>65,535</span></div>
+      <p class="zoomnote">Zoomed: the top 256 bytes of the page, where the stack frame and the constants live.</p>
+      <div class="bytes-wrap"><div class="bytes" id="bytes"></div></div>
+      <div class="legend">
+        <span><i class="sw" style="background:var(--frame)"></i>histogram, in main's frame</span>
+        <span><i class="sw" style="background:var(--stats)"></i>stats, in main's frame</span>
+        <span><i class="sw" style="background:var(--data)"></i>BANDS, the static data</span>
+        <span><i class="sw" style="background:var(--flash)"></i>byte just written</span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Host calls</h2>
+      <ul class="log" id="log"></ul>
+      <h2 style="margin-top:18px">Readings fed through sample(i)</h2>
+      <div class="chart" id="chart"></div>
+      <h2 style="margin-top:18px">Histogram, read from the module's frame in host memory</h2>
+      <div class="bars" id="bars"></div>
+      <h2 style="margin-top:18px">report(stats, histogram), read in place</h2>
+      <div class="stats" id="stats"></div>
+      <p class="check" id="check"></p>
+    </section>
+  </div>
+
+  <section class="card contract">
+    <h2>The import is a contract</h2>
+    <p class="explain" style="min-height:0;margin-bottom:12px">The module asks for <code>(memory 1 1)</code>: at least one page, with a maximum of at most one.
+      Offer it any other memory and the engine refuses to instantiate it, so no host can hand the module more memory
+      than its stack and overflow checks were laid out for. Each button below really tries.</p>
+    <div class="offers" id="offers"></div>
+  </section>
+  <footer id="footer"></footer>
+</main>
+<script type="module" src="./app.mjs"></script>
+</body>
+</html>

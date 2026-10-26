@@ -1,0 +1,69 @@
+// Sensor statistics in a memory the host owns.
+//
+// The module imports its linear memory (`[memory] import = true`), so the host
+// creates that memory before the module exists and keeps it afterwards. The
+// host feeds samples one at a time through `sample`, and the program hands its
+// results back through `report`: both arrays arrive as addresses inside the
+// host's own memory, which the host reads in place.
+
+// Band edges: a sample below 10 is band 0, below 20 band 1, below 30 band 2,
+// and anything else band 3. A constant array lives in the module's static data
+// region, which instantiation writes into the host's memory.
+const BANDS: [i32; 3] = [10, 20, 30];
+
+external fn sample_count() -> i32;
+external fn sample(i: i32) -> i32;
+external fn report(stats: [i32; 4], histogram: [i32; 4]);
+use { sample_count, sample, report } from host::sensor;
+
+// The band a sample falls in, 0 to 3.
+fn band_of(v: i32) -> i32 {
+    let mut band: i32 = 0;
+    let mut j: i32 = 0;
+    loop j < 3 {
+        if v >= BANDS[j] {
+            band = j + 1;
+        }
+        j = j + 1;
+    }
+    return band;
+}
+
+// Reads every sample, then reports [count, min, max, sum] and the histogram.
+// Returns 0, or 1 when there is nothing to measure.
+pub fn main() -> i32 {
+    let n: i32 = sample_count();
+    if n <= 0 {
+        return 1;
+    }
+    let mut min: i32 = 0;
+    let mut max: i32 = 0;
+    let mut sum: i32 = 0;
+    let mut histogram: [i32; 4] = [0; 4];
+
+    let mut i: i32 = 0;
+    loop i < n {
+        let v: i32 = sample(i);
+        if i == 0 {
+            min = v;
+            max = v;
+        }
+        if v < min {
+            min = v;
+        }
+        if v > max {
+            max = v;
+        }
+        // Checked arithmetic: a sum past i32::MAX traps rather than wrapping.
+        sum = sum + v;
+        let b: i32 = band_of(v);
+        if b >= 0 && b < 4 {
+            histogram[b] = histogram[b] + 1;
+        }
+        i = i + 1;
+    }
+
+    let stats: [i32; 4] = [n, min, max, sum];
+    report(stats, histogram);
+    return 0;
+}
