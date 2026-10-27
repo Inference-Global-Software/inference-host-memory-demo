@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Writes dist/sensor-demo.html: web/index.html with the demo's scripts and the
-// compiled module inlined, so it opens straight from disk with no server.
+// Writes dist/sensor-demo.html: web/index.html with the demo's scripts, the
+// compiled module and the firmware inlined, so it opens straight from disk with no server.
 //
 //   infs build && node scripts/bundle.mjs
 
@@ -11,6 +11,7 @@ const root = (path) => fileURLToPath(new URL(`../${path}`, import.meta.url));
 const read = (path) => readFileSync(root(path), "utf8");
 
 const wasm = readFileSync(root("out/main.wasm")).toString("base64");
+const firmware = readFileSync(root("host/firmware.wasm")).toString("base64");
 const core = read("host/demo-core.mjs").replace(/^export /gm, "");
 const app = read("web/app.mjs")
   .replace(/^import \{[\s\S]*?\} from "\.\.\/host\/demo-core\.mjs"; \/\/ @bundle-strip\n/m, "");
@@ -20,7 +21,7 @@ const tag = '<script type="module" src="./app.mjs"></script>';
 const html = read("web/index.html");
 if (!html.includes(tag)) throw new Error("script tag not found in web/index.html");
 const inlined = html.replace(tag, () => [
-  `<script>globalThis.DEMO_WASM_BASE64 = "${wasm}";</script>`,
+  `<script>globalThis.DEMO_WASM_BASE64 = "${wasm}";\nglobalThis.DEMO_FIRMWARE_BASE64 = "${firmware}";</script>`,
   `<script type="module">\n${core}\n${app}\n</script>`,
 ].join("\n"));
 

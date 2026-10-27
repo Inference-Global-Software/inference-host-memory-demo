@@ -46,7 +46,7 @@
   h1 { font-size: 26px; line-height: 1.25; margin: 4px 0 0; text-wrap: balance; letter-spacing: -0.01em; }
 
   /* Step bar. */
-  .progress ol { list-style: none; margin: 20px 0 0; padding: 0; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; }
+  .progress ol { list-style: none; margin: 20px 0 0; padding: 0; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
   .progress button { width: 100%; text-align: left; font: inherit; font-size: 13px; color: var(--muted); background: none;
     border: 0; border-top: 3px solid var(--line); padding: 6px 2px 0; cursor: pointer; }
   .progress button b { display: block; font-size: 12px; font-weight: 600; }
@@ -71,10 +71,12 @@
   .box .who { font-weight: 600; }
   .box.host { border-color: var(--page); background: color-mix(in srgb, var(--page-soft) 45%, transparent); }
   .box.prog { border-color: var(--prog); background: color-mix(in srgb, var(--prog-soft) 45%, transparent); }
+  .box.fw { border-color: var(--host); background: color-mix(in srgb, var(--host-soft) 45%, transparent); }
   .mem { border-radius: 8px; padding: 12px; font-size: 14px; text-align: center; border: 2px solid; }
   .mem b { display: block; font-size: 15px; }
   .mem.in-host { border-color: var(--page); background: var(--page-soft); }
   .mem.in-prog { border-color: var(--prog); background: var(--prog-soft); }
+  .mem.in-fw { border-color: var(--host); background: var(--host-soft); }
   .mem.socket { border-style: dashed; border-color: var(--page); background: transparent; color: var(--muted); }
   .peek { font-size: 13px; color: var(--muted); }
   .arrow { display: grid; justify-items: center; gap: 2px; font-size: 13px; color: var(--muted); text-align: center; }
@@ -156,6 +158,18 @@
   .pg.new { animation: grow .7s ease-out; }
   @keyframes grow { from { transform: scaleX(.15); opacity: .2; } to { transform: none; opacity: 1; } }
   .cells.single { grid-template-columns: minmax(0, 1fr); max-width: 560px; margin-top: 14px; }
+  .diagram.wide { grid-template-columns: minmax(0, 1fr) 190px minmax(0, 1fr); }
+  .calls { display: grid; gap: 10px; }
+  .calls .arrow { font-size: 12px; }
+  .calls code { font-size: 11.5px; }
+  @media (max-width: 640px) { .diagram.wide { grid-template-columns: 1fr; } .calls .arrow { transform: none; } }
+  .facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 16px; }
+  @media (max-width: 760px) { .facts { grid-template-columns: 1fr; } }
+  .fact { background: var(--empty); border-radius: 10px; padding: 12px; min-width: 0; }
+  .fact b { display: block; margin-bottom: 2px; }
+  .fact p { margin: 0; font-size: 14px; color: var(--muted); }
+  .fact .ok { font-weight: 600; }
+  .pg.fw { background: var(--host-soft); border: 2px solid var(--host); }
 
   button, select { font: inherit; font-size: 15px; color: var(--ink); background: var(--panel); border: 1px solid var(--line);
     border-radius: 8px; padding: 7px 14px; cursor: pointer; }
@@ -250,6 +264,42 @@ await WebAssembly.instantiate(program, { env: { memory }, sensor: { … } });</d
 const bytes = new Uint8Array(memory.buffer);  // read memory.buffer again:
                                               // the old one is now detached
 memory.grow(1);  // at the program's maximum: RangeError</div></details>
+    </section>
+
+    <section class="step" id="embedded" data-name="Embedded" hidden>
+      <h2>Another program can share the memory</h2>
+      <p class="lede">Often the host is a bigger program with data of its own, such as firmware written in C or Rust.
+        Here a second WebAssembly program, the firmware, lives in pages 2&ndash;4 of the same memory. It holds the 24
+        readings, answers the Inference program's calls itself, and reads the results by address. This page only
+        creates the memory, loads both programs and starts the run: no JavaScript runs between them.</p>
+      <div class="diagram wide">
+        <div class="box prog"><span class="who">Inference program</span><div class="mem in-prog"><b>page 1</b>its stack, counters, results and band limits</div></div>
+        <div class="calls">
+          <div class="arrow strong"><svg viewBox="0 0 120 18" aria-hidden="true"><line x1="2" y1="9" x2="112" y2="9"/><path d="M104 3 L114 9 L104 15"/></svg><span><code>sample_count()</code>, <code>sample(i)</code></span></div>
+          <div class="arrow"><svg viewBox="0 0 120 18" aria-hidden="true"><line x1="8" y1="9" x2="118" y2="9"/><path d="M16 3 L6 9 L16 15"/></svg>readings from its log</div>
+          <div class="arrow strong"><svg viewBox="0 0 120 18" aria-hidden="true"><line x1="2" y1="9" x2="112" y2="9"/><path d="M104 3 L114 9 L104 15"/></svg><code id="emb-report">report(…)</code></div>
+        </div>
+        <div class="box fw"><span class="who">Firmware</span><div class="mem in-fw"><b>pages 2&ndash;4</b>its readings log, and its copy of the results</div></div>
+      </div>
+      <div class="pages" id="emb-pages"></div>
+      <div class="facts" id="emb-facts"></div>
+      <div class="player" style="margin-top:14px"><button id="emb-run">Run both programs again</button></div>
+      <details><summary>The firmware's code (WebAssembly text)</summary>
+        <div class="code">;; sample(i): reading i, from the firmware's own log at byte 65,540 + 4 &times; i
+(func (export "sample") (param $i i32) (result i32)
+  (call $answered)
+  (i32.load (i32.add (i32.const 65540) (i32.shl (local.get $i) (i32.const 2)))))
+
+;; report(stats, histogram): two addresses in page 1; read the numbers there
+;; and keep a copy in page 2
+(func (export "report") (param $stats i32) (param $histogram i32)
+  (call $answered)
+  (call $copy (local.get $stats) (i32.const 66048))
+  (call $copy (local.get $histogram) (i32.const 66064)))
+
+;; and in the page: the module's imports are the firmware's exports
+const firmware = await WebAssembly.instantiate(firmwareBytes, { env: { memory } });
+await WebAssembly.instantiate(programBytes, { env: { memory }, sensor: firmware.instance.exports });</div></details>
     </section>
 
     <section class="step" id="try" data-name="Try it" hidden>

@@ -34,7 +34,7 @@ it in at instantiation, and can watch everything the module keeps there.
 
 ## The walkthrough
 
-The browser page is a six-step walkthrough, one idea per screen:
+The browser page is a seven-step walkthrough, one idea per screen:
 
 1. **Normally**: a program creates its own memory, and the page can only look inside afterwards.
 2. **Imported**: with `[memory] import = true`, the page creates the memory and hands it over.
@@ -43,7 +43,12 @@ The browser page is a six-step walkthrough, one idea per screen:
 5. **Growing**: while the program runs, the page grows the memory from 1 page to 4, writing
    its own data into each new page; the program keeps counting in page 1. Then the page asks
    for a fifth page, and the browser refuses: 4 is the maximum the program declared.
-6. **Try it**: hand the program a different memory and see it accepted or refused, and why.
+6. **Embedded**: the module runs inside another program's memory. A second WebAssembly
+   program, the firmware in `host/firmware.wat`, stands in for the C or Rust program a module
+   like this is embedded in. It lives in pages 2–4, holds the readings, answers the module's
+   `sample_count` and `sample(i)` calls itself, and reads the results from page 1 by address.
+   The module's `sensor` imports are the firmware's exports, so no JavaScript runs between them.
+7. **Try it**: hand the program a different memory and see it accepted or refused, and why.
 
 The raw bytes behind each number are one click away ("Show the raw bytes").
 
@@ -60,6 +65,10 @@ node host/run.mjs           # terminal animation of the run
 node scripts/bundle.mjs     # writes dist/sensor-demo.html
 ```
 
+`node host/embedded.mjs` runs the module embedded in the firmware's memory and
+checks the outcome: the firmware answered every call, read the results by
+address, and never wrote to page 1.
+
 `node host/run.mjs --pages 3 --limit 4` runs in a different memory (`--limit
 none` asks for one with no limit, which the program refuses).
 
@@ -72,7 +81,7 @@ directly.
 the program's report disagrees with the host's arithmetic, if anything above
 page 1 changed, or if a memory the import does not admit was accepted, so it
 doubles as a test. In the browser, `#normal`, `#imported`, `#running`,
-`#results`, `#growing` and `#try` open that step; `#running-12` and
+`#results`, `#growing`, `#embedded` and `#try` open that step; `#running-12` and
 `#growing-12` open that replay paused at frame 12, and `#try-3-4` (or
 `#try-1-none`) starts the program in that memory.
 
@@ -95,6 +104,12 @@ An Inference program never grows its memory itself: nothing the compiler emits
 grows memory. A `max-pages` above `pages` is room for the host to grow into,
 and the browser stops it at that maximum.
 
+A program that shares the memory, like the firmware here, has to keep out of
+the module's pages. There is no layout negotiation yet: the module always puts
+its stack at address 0. So a C or Rust host built with `wasm-ld` would place its
+own data above the module's pages with `--global-base`. Two Inference modules
+cannot share one memory, because both would put their stack at address 0.
+
 ## The embedder contract
 
 The module owns the first `pages` pages of the memory it is given, here page 1:
@@ -112,6 +127,8 @@ memory* in the Inference book for the full contract.
 | `Inference.toml` | `[memory] import = true` and the host-import allowlist |
 | `host/demo-core.mjs` | Creates the memory, runs the module, records every host call |
 | `host/run.mjs` | Terminal host and animation |
+| `host/firmware.wat`, `host/firmware.wasm` | The firmware the module is embedded in (rebuild with `wat2wasm host/firmware.wat -o host/firmware.wasm`) |
+| `host/embedded.mjs` | Runs the module embedded in the firmware's memory, and checks it |
 | `web/index.html`, `web/app.mjs` | Browser view of the same run |
 | `scripts/bundle.mjs` | Inlines the page into `dist/sensor-demo.html` |
 

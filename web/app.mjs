@@ -1,21 +1,23 @@
-// Drives web/index.html, a six-step walkthrough: how a program normally gets
+// Drives web/index.html, a seven-step walkthrough: how a program normally gets
 // its memory, how an imported one differs, the program running in this page's
 // memory, its results read in place, the page growing that memory up to the
-// program's limit, and an experiment with other memories.
+// program's limit, the program embedded in another program's memory, and an
+// experiment with other memories.
 //
 // The URL fragment names the step to open (`#normal`, `#imported`,
-// `#running`, `#results`, `#growing`, `#try`). For screenshots, `#running-12`
+// `#running`, `#results`, `#growing`, `#embedded`, `#try`). For screenshots, `#running-12`
 // and `#growing-12` open that replay paused at frame 12, and `#try-3-4` or
 // `#try-1-none` starts the program in that memory.
 
 import {
   DEFAULT_MEMORY, ZOOM_START, makeReadings, expectedReport, runDemo, dataSegment, memoryImport, judgeMemory, tryMemory,
+  runEmbedded, FIRMWARE,
 } from "../host/demo-core.mjs"; // @bundle-strip
 
 const $ = (id) => document.getElementById(id);
 const fmt = (n) => n.toLocaleString("en-US");
 const amount = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-const STEPS = ["normal", "imported", "running", "results", "growing", "try"];
+const STEPS = ["normal", "imported", "running", "results", "growing", "embedded", "try"];
 const BANDS = ["under 10", "10–19", "20–29", "30 and up"];
 const bandOf = (v) => (v >= 30 ? 3 : v >= 20 ? 2 : v >= 10 ? 1 : 0);
 const describe = (d) =>
@@ -35,6 +37,16 @@ async function loadWasm() {
   }
   const response = await fetch(new URL("../out/main.wasm", import.meta.url));
   if (!response.ok) throw new Error("out/main.wasm not found: run `infs build` first");
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+/** The firmware the Inference module is embedded in, in the Embedded step (host/firmware.wat). */
+async function loadFirmware() {
+  if (globalThis.DEMO_FIRMWARE_BASE64) {
+    return Uint8Array.from(atob(globalThis.DEMO_FIRMWARE_BASE64), (c) => c.charCodeAt(0));
+  }
+  const response = await fetch(new URL("../host/firmware.wasm", import.meta.url));
+  if (!response.ok) throw new Error("host/firmware.wasm not found");
   return new Uint8Array(await response.arrayBuffer());
 }
 
@@ -250,7 +262,51 @@ async function main() {
     $("grow-restart").disabled = true;
   }
 
-  // Step 6: the experiment.
+  // Step 6: the program embedded in another program's memory.
+  const aloneTop = frames[frames.length - 1].bytes;
+  const drawEmbedded = (emb) => {
+    const { firmware: fw, program } = emb;
+    $("emb-report").textContent = `report(${fmt(fw.statsAddress)}, ${fmt(fw.histogramAddress)})`;
+    const blocks = [`<div class="pg program"><b>page 1</b>Inference program</div>`];
+    for (let page = 2; page <= emb.descriptor.maximum; page += 1) {
+      blocks.push(page <= emb.pages
+        ? `<div class="pg fw"><b>page ${page}</b>firmware: readings and its copy</div>`
+        : `<div class="pg room"><b>page ${page}</b>firmware's room to grow</div>`);
+    }
+    $("emb-pages").innerHTML = blocks.join("");
+    const calls = `1 &times; <code>sample_count()</code>, ${readings.length} &times; <code>sample(i)</code> and 1 &times; <code>report(…)</code>`;
+    $("emb-facts").innerHTML = [
+      `<div class="fact"><b>The firmware answered ${fw.answered} calls.</b><p>${calls}, each going straight from one ` +
+        `program to the other. Its readings log, at byte ${fmt(FIRMWARE.readings)}, starts ${fw.readings.slice(0, 4).join(", ")}, …</p></div>`,
+      `<div class="fact"><b>It read the results itself.</b><p>At byte ${fmt(fw.statsAddress)} in page 1 it found ` +
+        `${program.stats.map(fmt).join(" · ")}, and copied them into its own page at byte ${fmt(FIRMWARE.results)}: ` +
+        `${fw.copiedStats.map(fmt).join(" · ")}.</p></div>`,
+      `<div class="fact"><b>Page 1 is as the program left it.</b><p>${emb.sameAsAlone
+        ? `<span class="ok">Its last 256 bytes match a run with no firmware at all.</span> The firmware read page 1, but never wrote to it.`
+        : `<span class="bad">Page 1 differs from a run with no firmware.</span>`}</p></div>`,
+    ].join("");
+  };
+  let firmwareBytes = null;
+  const runEmb = async () => {
+    if (recorded?.embedded) return drawEmbedded(recorded.embedded);
+    firmwareBytes ??= await loadFirmware();
+    const emb = await runEmbedded(wasm, firmwareBytes);
+    emb.sameAsAlone = emb.pageOneTop.every((byte, i) => byte === aloneTop[i]);
+    drawEmbedded(emb);
+  };
+  $("emb-run").onclick = async () => {
+    $("emb-facts").innerHTML = "";
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await runEmb();
+  };
+  try {
+    await runEmb();
+  } catch (error) {
+    $("emb-facts").innerHTML = `<div class="fact"><b>Could not run the firmware.</b><p>${String(error)}</p></div>`;
+  }
+  if (recorded) $("emb-run").disabled = true;
+
+  // Step 7: the experiment.
   $("rules").innerHTML = `The program was built to need at least ${amount(limits.minimum, "page")} of 64 KiB, and to never ` +
     `grow past ${amount(limits.maximum, "page")} (<code>max-pages = ${limits.maximum}</code>). Hand it a memory and see what it does.`;
   $("pages").innerHTML = Array.from({ length: 7 }, (_, n) => `<option value="${n}">${amount(n, "page")}</option>`).join("");

@@ -306,3 +306,44 @@ export function dataSegment(wasmBytes) {
   [length, j] = leb(wasmBytes, j);
   return { offset, length };
 }
+
+/** Where the firmware (host/firmware.wat) keeps its data, all in page 2. */
+export const FIRMWARE = Object.freeze({
+  count: 65536, readings: 65540, results: 66048, counters: 66064, answered: 66080, addresses: 66084,
+});
+
+/**
+ * Runs the Inference module embedded in the firmware's memory: one memory,
+ * the firmware instantiated in it first, then the module with the firmware's
+ * own exports as its `sensor` imports, so every call between the two goes
+ * straight from one program to the other. This function only creates the
+ * memory, loads both programs and calls `main`; it reads the outcome back
+ * afterwards.
+ */
+export async function runEmbedded(inferenceBytes, firmwareBytes, descriptor = { initial: 2, maximum: 4 }) {
+  const memory = new WebAssembly.Memory(descriptor);
+  const { instance: firmware } = await WebAssembly.instantiate(firmwareBytes, { env: { memory } });
+  const { instance: program } = await WebAssembly.instantiate(inferenceBytes, {
+    env: { memory },
+    sensor: firmware.exports,
+  });
+  const result = program.exports.main();
+  const view = (address, count) => Array.from(new Int32Array(memory.buffer, address, count));
+  const count = view(FIRMWARE.count, 1)[0];
+  const [statsAddress, histogramAddress] = view(FIRMWARE.addresses, 2);
+  return {
+    descriptor: { ...descriptor },
+    pages: memory.buffer.byteLength / PAGE_BYTES,
+    result,
+    firmware: {
+      readings: view(FIRMWARE.readings, count),
+      answered: view(FIRMWARE.answered, 1)[0],
+      statsAddress,
+      histogramAddress,
+      copiedStats: view(FIRMWARE.results, 4),
+      copiedHistogram: view(FIRMWARE.counters, 4),
+    },
+    program: { stats: view(statsAddress, 4), histogram: view(histogramAddress, 4) },
+    pageOneTop: new Uint8Array(memory.buffer.slice(ZOOM_START, PAGE_BYTES)),
+  };
+}
